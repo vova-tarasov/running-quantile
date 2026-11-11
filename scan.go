@@ -61,6 +61,9 @@ func extractNumber(line []byte, field string) (float64, reason) {
 	if c := s.match[0]; c != '-' && (c < '0' || c > '9') {
 		return 0, notNumber
 	}
+	if v, ok := smallInt(s.match); ok {
+		return v, valid
+	}
 	v, err := strconv.ParseFloat(string(s.match), 64)
 	if err != nil { // the grammar is already checked, so this is ErrRange
 		return 0, outOfRange
@@ -69,6 +72,33 @@ func extractNumber(line []byte, field string) (float64, reason) {
 		v = 0 // turns -0 into 0
 	}
 	return v, valid
+}
+
+// maxSmallIntDigits is the most digits smallInt converts. 10^15 < 2^53, so every such integer is a float64 exactly.
+const maxSmallIntDigits = 15
+
+// smallInt returns the value of num, a valid JSON number, if it is an integer of at most maxSmallIntDigits digits
+// (no fraction, no exponent). The value is exact, so it is the one strconv.ParseFloat returns, except that -0 is 0.
+// ok is false for any other number.
+func smallInt(num []byte) (v float64, ok bool) {
+	neg := num[0] == '-'
+	if neg {
+		num = num[1:]
+	}
+	if len(num) > maxSmallIntDigits {
+		return 0, false
+	}
+	var n int64
+	for _, c := range num {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int64(c-'0')
+	}
+	if neg {
+		n = -n // an integer, so -0 is 0
+	}
+	return float64(n), true
 }
 
 // isJSONNumber reports whether all of s is one JSON number.
@@ -82,14 +112,13 @@ func isJSONNumber(s string) bool {
 // The key is decoded a rune at a time and compared with field as it goes, so nothing is allocated.
 func keyEquals(raw []byte, field string) bool {
 	i := 0
-	for i < len(raw) && raw[i] != '\\' && raw[i] < utf8.RuneSelf {
-		i++
+	for ; i < len(raw) && raw[i] != '\\' && raw[i] < utf8.RuneSelf; i++ {
+		if i == len(field) || raw[i] != field[i] {
+			return false // plain ASCII decodes to itself, so the key and field differ at byte i
+		}
 	}
-	if i == len(raw) { // plain ASCII decodes to itself
-		return string(raw) == field
-	}
-	j := 0 // field[:j] equals the key decoded so far
-	for i = 0; i < len(raw); {
+	j := i // field[:j] equals the key decoded so far
+	for i < len(raw) {
 		r, size := rune(raw[i]), 1
 		switch {
 		case r == '\\' && raw[i+1] == 'u':

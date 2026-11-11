@@ -190,12 +190,14 @@ A single goroutine handles each record in four steps:
    rest of the line is read and dropped without storing it, so a huge line can't exhaust memory.
 2. **Scanning.** A hand-written scanner makes one pass over the line. It validates the whole line against the
    JSON grammar (RFC 8259) and remembers the value of the last top-level key equal to the field.
-   - Keys that are plain ASCII with no backslash are compared as raw bytes. Any other key is decoded the way
-     `encoding/json` decodes it (escapes, surrogate pairs, U+FFFD for lone surrogates and invalid UTF-8) and
-     compared as it is decoded.
+   - A key's plain ASCII bytes are compared with the field directly, stopping at the first difference. From the
+     first backslash or non-ASCII byte on, the rest of the key is decoded the way `encoding/json` decodes it
+     (escapes, surrogate pairs, U+FFFD for lone surrogates and invalid UTF-8) and compared as it is decoded.
    - Nested objects and arrays are validated and skipped, with nesting capped at 10,000 levels so recursion can't
      overflow the stack.
-   - The number's bytes go to `strconv.ParseFloat`.
+   - An integer of at most 15 digits (no fraction or exponent) is converted directly. That is exact, because
+     10^15 < 2^53, so it gives the same float64 as `strconv.ParseFloat`. Any other number's bytes go to
+     `strconv.ParseFloat`.
 3. **Tracking.** The value is added to a tracker, which returns the current quantile.
 4. **Writing.** The quantile is formatted straight into the free space of a 1 MiB `bufio.Writer`
    (`AvailableBuffer`).
@@ -269,4 +271,66 @@ the top of `low` and x[k+1] is the top of `high`.
 
 ## Performance
 
-Measurements come in a later iteration.
+Measured on an Apple M4, Go 1.26.0, macOS. The program runs on one core. `make bench` runs these benchmarks:
+
+- `BenchmarkExtractNumber`: one record, either the task's 147-byte example line (`pdf`) or the same line with the
+  `latency_ms` key written with an escape (`escaped-key`), which takes the decoding path.
+- `BenchmarkAppendFloat`: formatting a cycle of typical quantiles.
+- `BenchmarkTrackerAdd`: Add plus Quantile at q = 0.5, on random floats (all distinct) and on ints 0..999. Each
+  tracker grows from 0 to 2^20 values and is then replaced.
+- `BenchmarkProcess`: the whole pipeline over 1M records shaped like the task's example (153 MB, held in memory),
+  on `latency_ms`.
+
+Each number is a median. For the buffer sizes it is the median of 6 runs per size. The buffer sizes were also
+checked end to end: the binary on a 1.53 GB file of 10M such records (warm page cache, stdout to `/dev/null`),
+7 alternating runs each. Every other before/after pair comes from two test binaries run alternately, 10 runs
+each, so drift affects both sides equally. Each change was measured on top of the ones kept before it.
+
+| Change | Before | After | Kept? |
+|---|---|---|---|
+| `readBufSize` 64 KiB / 256 KiB / **1 MiB** / 4 MiB | `BenchmarkProcess`: 240.8 / 241.9 / 241.2 / 242.2 ns per record; binary: 2.501 / 2.496 / 2.495 / 2.493 s | (same) | no difference beyond noise; 1 MiB stays, so lines up to 1 MiB are never copied |
+| `writeBufSize` 64 KiB / 256 KiB / **1 MiB** / 4 MiB | `BenchmarkProcess`: 241.5 / 241.9 / 242.2 / 241.7 ns per record; binary: 2.490 / 2.488 / 2.492 / 2.493 s | (same) | no difference beyond noise; 1 MiB stays |
+| `chunkBits` 12 / **13** / 14 / 16 | see the next table | (same) | 13 stays |
+| Integer fast path: an integer of up to 15 digits is converted without `strconv.ParseFloat` | `pdf` 151.3 ns, `escaped-key` 175.2 ns, `BenchmarkProcess` 242.3 ns per record | 144.2 ns, 167.6 ns, 231.9 ns | yes |
+| `keyEquals` in one loop: compare plain ASCII bytes with the field as they are scanned, stop at the first difference | `pdf` 144.2 ns, `escaped-key` 168.5 ns, `BenchmarkProcess` 231.5 ns per record | 131.0 ns, 155.0 ns, 217.2 ns | yes |
+| `keyEquals` decodes from the end of the matching ASCII prefix instead of from the start of the key | `pdf` 130.8 ns, `escaped-key` 154.6 ns | 130.9 ns, 139.4 ns | yes |
+
+`chunkBits`, `BenchmarkTrackerAdd` in ns per Add (10 alternating runs each):
+
+| | 12 | **13** | 14 | 16 |
+|---|---|---|---|---|
+| heaps, random | 58.2 | 59.1 | 59.4 | 58.3 |
+| heaps, ints | 56.5 | 57.3 | 57.4 | 56.7 |
+| distinct, random | 125.1 | 128.0 | 125.6 | 123.8 |
+| distinct, ints | 22.4 | 22.3 | 22.3 | 22.2 |
+| adaptive, random | 65.3 | 65.9 | 64.9 | 62.2 |
+| adaptive, ints | 24.0 | 23.9 | 23.9 | 24.0 |
+
+Only 16 was clearly faster, and only on adaptive/random (−6%). But at 14 and 16 the first chunk of each of a
+distinct tracker's two heaps is 128 KiB or 512 KiB, so 100 distinct values take more than the 256 KiB that
+`TestDistinctMemoryFollowsDistinctValues` allows. 13 stays.
+
+Before and after the whole pass. The first four rows are medians of 6 runs of `make bench` at the start and at
+the end (and the binary row as above). The last two rows come from 10 alternating runs of the two versions:
+
+| Benchmark | Before | After |
+|---|---|---|
+| `BenchmarkExtractNumber/pdf` | 148.2 ns, 0 allocs | 130.1 ns, 0 allocs |
+| `BenchmarkExtractNumber/escaped-key` | 173.3 ns, 0 allocs | 139.1 ns, 0 allocs |
+| `BenchmarkProcess` | 241.1 ns per record, 635 MB/s | 217.7 ns per record, 704 MB/s |
+| binary, 1.53 GB file of 10M records | 2.492 s | 2.230 s (same output) |
+| `BenchmarkAppendFloat` | 21.3 ns | 21.3 ns |
+| `BenchmarkTrackerAdd`: heaps random, ints; distinct random, ints; adaptive random, ints | 61.1, 56.2, 126.9, 22.6, 64.7, 24.2 ns | 61.3, 57.9, 126.5, 22.3, 65.2, 23.8 ns |
+
+The formatter and the trackers did not change, and their numbers differ only by noise. `BenchmarkProcess` makes
+27 allocations per run of 1M records, and `TestProcessAllocationsDoNotGrowWithRecords` checks that 101k records
+make at most 10 more allocations than 1k records.
+
+Chosen constants:
+
+| Constant | Value |
+|---|---|
+| `readBufSize` | 1 MiB |
+| `writeBufSize` | 1 MiB |
+| `chunkBits` | 13 (8192 values, 64 KiB per chunk) |
+| `maxSmallIntDigits` | 15 |
