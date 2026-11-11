@@ -37,7 +37,8 @@ func TestDistinctMatchesHeapsBitForBit(t *testing.T) {
 	}
 }
 
-// TestDistinctToHeapsPreservesState checks that a converted heapTracker continues exactly like a fresh one.
+// TestDistinctToHeapsPreservesState checks that a converted heapTracker has the exact low/high split and quantile
+// at once, and then continues like a fresh one fed the same values (restarting the generators after conversion).
 func TestDistinctToHeapsPreservesState(t *testing.T) {
 	type tc struct {
 		name string
@@ -68,6 +69,12 @@ func TestDistinctToHeapsPreservesState(t *testing.T) {
 				fresh.Add(seq2(i))
 			}
 			h := d.toHeaps()
+			if k, _ := rank(at, c.q); h.low.len() != k+1 {
+				t.Fatalf("%s q=%v converted at %d: low has %d values, want %d", c.name, c.q, at, h.low.len(), k+1)
+			}
+			if got, want := h.Quantile(), fresh.Quantile(); math.Float64bits(got) != math.Float64bits(want) {
+				t.Fatalf("%s q=%v converted at %d: quantile %v, want %v", c.name, c.q, at, got, want)
+			}
 			for i := at; i < at+1500; i++ {
 				v := seq3(i)
 				if i >= at+1000 {
