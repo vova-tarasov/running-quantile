@@ -10,8 +10,10 @@ type tracker interface {
 }
 
 // rank returns the type 7 position of quantile q among n sorted values: the integer part k and the fraction f.
+// The explicit float64 conversions here and in lerp round each product, so the compiler cannot fuse it with the
+// next addition or subtraction into one FMA instruction (it does on arm64) and results are the same everywhere.
 func rank(n int, q float64) (k int, f float64) {
-	h := float64(n-1) * q
+	h := float64(float64(n-1) * q)
 	k = int(math.Floor(h))
 	return k, h - float64(k)
 }
@@ -20,9 +22,9 @@ func rank(n int, q float64) (k int, f float64) {
 func lerp(a, b, f float64) float64 {
 	d := b - a
 	if math.IsInf(d, 0) {
-		return (1-f)*a + f*b
+		return float64((1-f)*a) + float64(f*b)
 	}
-	return a + f*d
+	return a + float64(f*d)
 }
 
 // minTracker tracks the minimum (q = 0) in O(1) memory.

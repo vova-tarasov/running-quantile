@@ -45,33 +45,35 @@ func oracleInputs() map[string]func(i int) float64 {
 	}
 }
 
-// TestRank checks rank on the exact cases of the definition.
+// TestRank checks rank on the exact cases of the definition, and that h is rounded to float64 before k is
+// subtracted: for n = 101 and q = 0.29, h is 28.999999999999996, while a fused multiply-subtract gives f
+// 0.999999999999998.
 func TestRank(t *testing.T) {
 	for _, c := range []struct {
 		n int
 		q float64
 		k int
 		f float64
-	}{{1, 0.75, 0, 0}, {2, 0.75, 0, 0.75}, {6, 0.75, 3, 0.75}, {5, 1, 4, 0}} {
+	}{{1, 0.75, 0, 0}, {2, 0.75, 0, 0.75}, {6, 0.75, 3, 0.75}, {5, 1, 4, 0}, {101, 0.29, 28, 0.9999999999999964}} {
 		if k, f := rank(c.n, c.q); k != c.k || f != c.f {
 			t.Errorf("rank(%d, %v) = (%d, %v), want (%d, %v)", c.n, c.q, k, f, c.k, c.f)
 		}
 	}
-	if k, f := rank(101, 0.29); k != 28 || f <= 0.99 {
-		t.Errorf("rank(101, 0.29) = (%d, %v), want k 28 and f > 0.99", k, f)
-	}
 }
 
-// TestLerp checks interpolation, including the overflow fallback.
+// TestLerp checks interpolation, including the overflow fallback, and that every product is rounded to float64
+// before it is added: a fused multiply-add gives 1.7 and -1.190772539449263e+307 for the last two rows.
 func TestLerp(t *testing.T) {
-	if got := lerp(3, 5, 0.75); got != 4.5 {
-		t.Errorf("lerp(3, 5, 0.75) = %v", got)
-	}
-	if got := lerp(-math.MaxFloat64, math.MaxFloat64, 0.5); got != 0 {
-		t.Errorf("lerp(-Max, Max, 0.5) = %v", got)
-	}
-	if got := lerp(2, 2, 0.3); got != 2 {
-		t.Errorf("lerp(2, 2, 0.3) = %v", got)
+	for _, c := range []struct{ a, b, f, want float64 }{
+		{3, 5, 0.75, 4.5},
+		{-math.MaxFloat64, math.MaxFloat64, 0.5, 0},
+		{2, 2, 0.3, 2},
+		{1, 8, 0.1, 1.7000000000000002},
+		{-math.MaxFloat64, 1e308, 0.6, -1.1907725394492634e+307},
+	} {
+		if got := lerp(c.a, c.b, c.f); got != c.want {
+			t.Errorf("lerp(%v, %v, %v) = %v, want %v", c.a, c.b, c.f, got, c.want)
+		}
 	}
 }
 
