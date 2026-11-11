@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: make test
+      - name: Coverage gate
+        run: make cover
+
+  coverage-badge:
+    name: coverage badge
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Measure coverage
+        run: make cover
+      - name: Publish the badge to the badges branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pct=$(awk '$1 == "total:" { print $NF }' coverage.txt)
+          value=$(printf '%s' "$pct" | tr -d '%')
+          color=$(awk -v v="$value" 'BEGIN { print (v >= 99 ? "brightgreen" : v >= 90 ? "green" : v >= 75 ? "yellow" : "red") }')
+          mkdir badge
+          cd badge
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s","color":"%s"}\n' "$pct" "$color" > coverage.json
+          cat coverage.json
+          git init -q -b badges
+          git add coverage.json
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -q -m 'Update coverage badge'
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
