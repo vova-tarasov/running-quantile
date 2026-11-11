@@ -38,7 +38,7 @@ func (r reason) describe(field string) string {
 	case outOfRange:
 		return fmt.Sprintf("field %q is out of float64 range", field)
 	case lineTooLong:
-		return "line too long (over 64 MiB)"
+		return fmt.Sprintf("line too long (over %d MiB)", maxLineBytes>>20)
 	}
 	return ""
 }

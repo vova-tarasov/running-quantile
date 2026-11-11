@@ -26,7 +26,7 @@ func readPath(stdin io.Reader) (string, error) {
 		line = bytes.TrimSuffix(line[:n-1], []byte("\r"))
 	}
 	if len(line) > maxPathBytes {
-		return "", errors.New("first line of stdin is longer than 4096 bytes; expected a file path")
+		return "", fmt.Errorf("first line of stdin is longer than %d bytes; expected a file path", maxPathBytes)
 	}
 	if len(line) == 0 {
 		return "", errors.New("expected a file path on stdin")

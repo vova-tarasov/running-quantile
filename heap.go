@@ -40,11 +40,11 @@ func (h *floatHeap) push(v float64) {
 
 // pop removes and returns the smallest value. The heap must not be empty.
 func (h *floatHeap) pop() float64 {
-	min := *h.at(0)
+	smallest := *h.at(0)
 	h.n--
 	*h.at(0) = *h.at(h.n)
 	h.siftDown(0)
-	return min
+	return smallest
 }
 
 // heapify restores the heap order after appendUnordered calls.
