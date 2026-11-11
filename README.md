@@ -43,23 +43,24 @@ $ echo /tmp/example.jsonl | ./running-quantile 0.75 latency_ms
 
 It needs Go 1.26 and nothing else: there are no dependencies, so `go build` is the whole build. It was developed with
 Go 1.26.0 on macOS (arm64) and checked on Linux (arm64 and amd64) with the `golang:1.26` Docker image (Go 1.26.11).
-The Makefile uses only POSIX make and shell features. It was run with GNU make 3.81 (macOS) and 4.4.1 (Linux);
-BSD make was not tried.
+The Makefile uses only POSIX make, shell and awk features, and works when recipes run under `sh -e`, as POSIX make
+runs them. It was run with GNU make 3.81 (macOS) and 4.4.1 (Linux), and with 4.4.1 in `.POSIX` mode; BSD make was
+not tried.
 
 | Command | What it does |
 |---|---|
 | `make build` | builds `./running-quantile` (`go build -o running-quantile .`) |
 | `make test` | fails if a file needs `gofmt`, runs `go vet` (also with the `stress` build tag), then `go test ./...` (about 1 s of tests) |
-| `make cover` | runs the tests with a coverage profile, prints the coverage of every function, and fails if any function except `main` is below 100.0% |
+| `make cover` | runs the tests with a coverage profile, writes the coverage of every function to `coverage.txt` and prints it, and fails if any function except `main` is below 100.0% |
 | `make bench` | runs the benchmarks (see [Performance and memory](#performance-and-memory)) |
 | `make fuzz` | runs each of the three fuzz targets for `FUZZTIME`, 60 s by default (`make fuzz FUZZTIME=10m`) |
 | `make stress` | runs the on-demand stress test: a seeded file of up to 24 GB, two runs of the binary, about 2 minutes on an M4 (see [Testing](#testing)) |
-| `make clean` | removes the binary and the coverage profile |
+| `make clean` | removes the binary and the coverage files |
 
 The stress test writes its file to the temporary directory (`TMPDIR` picks another one) and deletes it afterwards. At
 the full 24 GB it needs 24 GB of free disk, and about 3 GB of memory for the reference values in the test process.
-`RQ_STRESS_BYTES` sets a smaller size, from 1 to 24000000000 bytes: `RQ_STRESS_BYTES=200000000 make stress` takes
-about a second.
+`RQ_STRESS_BYTES` sets a smaller size, from 1 to 24000000000 bytes: `RQ_STRESS_BYTES=200000000 make stress` took
+1.4–1.7 s in three runs on the M4.
 
 ## The quantile
 
@@ -288,7 +289,7 @@ skipped 2 invalid records
   instruction, which rounds once instead of twice. It does so on arm64 (and on amd64 with `GOAMD64=v3`). So
   `rank` and `lerp` round each product to float64 with an explicit conversion, which forbids the fusion. Without
   it, an arm64 build and an amd64 build disagreed in the last digit on 2–32% of 100,000 output lines at q = 0.1,
-  0.29, 0.9, 0.95 and 0.99 (none at 0.5 and 0.75, where the products are exact). With it, their output is
+  0.29, 0.9, 0.95 and 0.99 (none at 0.5 and 0.75, where the products happened to be exact). With it, their output is
   identical. `TestRank` and `TestLerp` pin the rounded results, and they fail on arm64 without the conversions.
 - **Integers above 2^53** are rounded to the nearest float64 when parsed. The quantile is exact for the parsed
   values.
@@ -314,20 +315,23 @@ Measured on an Apple M4 (10 cores, 32 GB of RAM), macOS (Darwin 27.2), Go 1.26.0
 - 128,698 blank lines (one in 997).
 
 It runs the binary twice on that file, streams and checks its output, and logs the time. The file is read from
-the page cache or the disk, and the test reads every output line through a pipe. The test ran twice, both times
-passing every check: once when it was written (run 1), and once on the final code (run 2).
+the page cache or the disk, and the test reads every output line through a pipe. The full test ran three times,
+each time passing every check: twice when it was written (run 2 after the test began returning its reference
+data to the OS before starting the binary), and once on the final code (run 3).
 
 | Run | Field and q | Wall time | Throughput | Records/s | Peak RSS as read in the test |
 |---|---|---|---|---|---|
-| 1 | `latency_ms`, 0.99 | 33.7 s | 712 MB/s | 3.80 M | 7.5 MiB |
-| 1 | `duration_us`, 0.5 | 48.8 s | 492 MB/s | 2.62 M | 507.5 MiB (too low, see below) |
-| 2 | `latency_ms`, 0.99 | 34.1 s | 704 MB/s | 3.76 M | 7.4 MiB |
-| 2 | `duration_us`, 0.5 | 48.7 s | 493 MB/s | 2.63 M | 486.0 MiB (too low, see below) |
+| 1 | `latency_ms`, 0.99 | 34.2 s | 701 MB/s | 3.74 M | 7.5 MiB |
+| 1 | `duration_us`, 0.5 | 49.1 s | 489 MB/s | 2.61 M | 462.6 MiB (too low, see below) |
+| 2 | `latency_ms`, 0.99 | 33.7 s | 712 MB/s | 3.80 M | 7.5 MiB |
+| 2 | `duration_us`, 0.5 | 48.8 s | 492 MB/s | 2.62 M | 507.5 MiB (too low, see below) |
+| 3 | `latency_ms`, 0.99 | 34.1 s | 704 MB/s | 3.76 M | 7.4 MiB |
+| 3 | `duration_us`, 0.5 | 48.7 s | 493 MB/s | 2.63 M | 486.0 MiB (too low, see below) |
 
 The `duration_us` readings in the test are too low: 128M float64 values alone take 977 MiB. The machine was
 already using 4 GB of swap, and the test adds 24 GB of file cache, plus about 3 GB of reference data while it
 computes the expected output. So macOS compressed part of the binary's heap (about 928,000 page compressions
-during run 2), and Maxrss does not count compressed pages. The true peak comes from running the binary alone on
+during run 3), and Maxrss does not count compressed pages. The true peak comes from running the binary alone on
 the same file, with `echo <file> | /usr/bin/time -l ./running-quantile <q> <field> | tail -1` (about 47,000
 compressions during the `duration_us` run):
 
@@ -336,10 +340,10 @@ compressions during the `duration_us` run):
 | `latency_ms`, 0.99 | 8.6 MiB | 7.1 MiB | (distinct mode: memory follows the distinct values) |
 | `duration_us`, 0.5 | 981.4 MiB | 988.5 MiB | 8.04 B (Max RSS) |
 
-The peak memory footprint is macOS's count that includes compressed pages. A standalone run after run 1 gave
-988.6 MiB of Max RSS for `duration_us`. The stress test asserts at most 64 MiB for `latency_ms` (storing every
-value would take 977 MiB) and at most 8·n·1.25 + 64 MiB = 1285.2 MiB for `duration_us`, and it logs a note when
-the `duration_us` reading is below 8 bytes per value.
+The peak memory footprint is macOS's count that includes compressed pages. A standalone run while the stress
+test was being written gave 988.6 MiB of Max RSS for `duration_us`. The stress test asserts at most 64 MiB for
+`latency_ms` (storing every value would take 977 MiB) and at most 8·n·1.25 + 64 MiB = 1285.2 MiB for
+`duration_us`, and it logs a note when the `duration_us` reading is below 8 bytes per value.
 
 On Linux, in a linux/arm64 container on the same M4, `RQ_STRESS_BYTES=3000000000 make stress` (16,006,870 valid
 records) passes with 703 MB/s and 4.9 MiB for `latency_ms`, and 523 MB/s and 127.9 MiB for `duration_us`
@@ -445,8 +449,9 @@ Chosen constants:
 ## Testing
 
 `make test` runs every suite below except the coverage gate, the Linux runs and the stress test; the fuzz targets
-run only their seed corpus there. All tests use only the standard library. There are 54 test functions, 3 fuzz
-targets and 4 benchmarks.
+run only their seed corpus there. All tests use only the standard library. `make test` runs 54 test functions and
+the seed corpora of 3 fuzz targets. Besides those, `TestMain` builds the binary, and the stress-tagged
+`TestStress24GB` runs only under `make stress`. There are 4 benchmarks.
 
 - **Trackers against a reference** (`quantile_test.go`, `distinct_test.go`, `heap_test.go`).
   - Every tracker is checked bit for bit, after every Add, against a reference that sorts a copy and applies

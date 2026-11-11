@@ -264,6 +264,7 @@ func runStress(t *testing.T, path string, f stressFile, q, field string, want []
 		t.Errorf("running-quantile %s %s: %v", q, field, err)
 	}
 	elapsed := time.Since(start)
+	rss, rssOK := peakRSS(cmd.ProcessState) // stops the linux poller before the pid can be reused
 	if n != f.valid {
 		t.Errorf("got %d lines, want %d", n, f.valid)
 	}
@@ -280,15 +281,14 @@ func runStress(t *testing.T, path string, f stressFile, q, field string, want []
 	}
 	t.Logf("%s %s: %d lines in %v, %.0f MB/s, %.0f records/s", q, field, n, elapsed.Round(time.Millisecond),
 		float64(f.size)/1e6/elapsed.Seconds(), float64(n)/elapsed.Seconds())
-	rss, ok := peakRSS(cmd.ProcessState)
-	if !ok {
+	if !rssOK {
 		t.Log("peak RSS is not available, so it is not checked")
 		return
 	}
 	t.Logf("peak RSS %.1f MiB, bound %.1f MiB", float64(rss)/(1<<20), float64(maxRSS)/(1<<20))
 	if rss < minRSS {
-		t.Logf("note: peak RSS reads below the %.1f MiB (8 B per value) the heaps need, so some of the binary's "+
-			"pages were compressed or swapped out (macOS memory compression); the true peak is higher",
+		t.Logf("note: peak RSS reads below the %.1f MiB (8 B per value) the heaps need, so it is under-reported "+
+			"(memory compression on macOS, or growth after the last 10 ms poll on linux); the true peak is higher",
 			float64(minRSS)/(1<<20))
 	}
 	if rss > maxRSS {

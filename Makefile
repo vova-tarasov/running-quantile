@@ -12,9 +12,9 @@ test:
 # cover fails when any function except main is below 100.0% statement coverage.
 cover:
 	go test -coverprofile=coverage.out ./...
-	go tool cover -func=coverage.out
-	@gaps=$$(go tool cover -func=coverage.out | grep -v '^total:' | grep -v '/main\.go:[0-9]*:[[:space:]]*main[[:space:]]' | grep -v '[[:space:]]100\.0%$$'); \
-	test -z "$$gaps" || { echo "functions below 100.0% coverage:"; echo "$$gaps"; exit 1; }
+	go tool cover -func=coverage.out > coverage.txt
+	@cat coverage.txt
+	@awk '$$1 != "total:" && !($$1 ~ /\/main\.go:[0-9]+:$$/ && $$2 == "main") && $$NF != "100.0%" { print "below 100.0% coverage: " $$0; bad = 1 } END { exit bad }' coverage.txt
 
 bench:
 	go test -run '^$$' -bench . -benchmem ./...
@@ -30,4 +30,4 @@ stress:
 	go test -count=1 -tags stress -run TestStress -timeout 90m -v .
 
 clean:
-	rm -f running-quantile coverage.out
+	rm -f running-quantile coverage.out coverage.txt
