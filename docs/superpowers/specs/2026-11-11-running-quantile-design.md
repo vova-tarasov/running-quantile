@@ -1,6 +1,6 @@
 # Running Quantile — Design
 
-Date: 2026-11-11 · Status: draft, awaiting approval
+Date: 2026-11-11 · Status: approved 2026-11-11 (implemented on branch implementation)
 
 Source task: `../Product_Metrics_Take_Home_Question_-_Running_Quantile.pdf` (one level above the project folder).
 
