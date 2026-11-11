@@ -24,7 +24,7 @@ fuzz:
 	go test -run '^$$' -fuzz '^FuzzProcess$$' -fuzztime $(FUZZTIME) .
 
 stress:
-	go test -tags stress -run TestStress -timeout 90m -v .
+	go test -count=1 -tags stress -run TestStress -timeout 90m -v .
 
 clean:
 	rm -f running-quantile coverage.out

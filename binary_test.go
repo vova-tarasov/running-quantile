@@ -73,7 +73,9 @@ func TestBinaryExitCodes(t *testing.T) {
 	}
 }
 
-// TestBinaryStopsWhenStdoutClosed checks that the binary exits promptly once the reader of its stdout goes away.
+// TestBinaryStopsWhenStdoutClosed checks that the binary does not hang when the reader of its stdout goes away:
+// it must exit within 10 s. The input takes well under a second anyway, so this does not show an early exit;
+// TestProcessStopsOnWriteError shows that process stops reading at the first write error.
 func TestBinaryStopsWhenStdoutClosed(t *testing.T) {
 	var in []byte
 	for i := range 3_000_000 {

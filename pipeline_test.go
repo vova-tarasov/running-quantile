@@ -59,7 +59,8 @@ func TestProcessStopsOnWriteError(t *testing.T) {
 }
 
 // TestProcessAllocationsDoNotGrowWithRecords checks that process allocates per run, not per record: 101k
-// low-cardinality records (latency_ms in 0..99) cost at most 10 more heap allocations than 1k.
+// low-cardinality records (latency_ms in 0..99) cost at most 10 more heap allocations than 1k. Every record must be
+// valid, so that the records really go through the tracker and the writer.
 func TestProcessAllocationsDoNotGrowWithRecords(t *testing.T) {
 	mallocs := func(records int) uint64 {
 		var in []byte
@@ -69,10 +70,10 @@ func TestProcessAllocationsDoNotGrowWithRecords(t *testing.T) {
 		}
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
-		_, err := process(bytes.NewReader(in), 0.5, "latency_ms", bufio.NewWriterSize(io.Discard, writeBufSize), io.Discard)
+		skipped, err := process(bytes.NewReader(in), 0.5, "latency_ms", bufio.NewWriterSize(io.Discard, writeBufSize), io.Discard)
 		runtime.ReadMemStats(&after)
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || skipped != 0 {
+			t.Fatalf("process over %d records: skipped %d, error %v; want 0, nil", records, skipped, err)
 		}
 		return after.Mallocs - before.Mallocs
 	}

@@ -4,7 +4,7 @@ package main
 
 import "os"
 
-// peakRSSBytes reports that the peak resident set size is not available on this OS.
-func peakRSSBytes(ps *os.ProcessState) (bytes int64, ok bool) {
-	return 0, false
+// watchPeakRSS returns a function that reports that the peak resident set size is not available on this OS.
+func watchPeakRSS(p *os.Process) func(ps *os.ProcessState) (bytes int64, ok bool) {
+	return func(*os.ProcessState) (int64, bool) { return 0, false }
 }

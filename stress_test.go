@@ -20,7 +20,7 @@ import (
 )
 
 // stressMaxBytes is the default and the largest size of the file TestStress24GB writes.
-const stressMaxBytes = 24_000_000_000
+const stressMaxBytes int64 = 24_000_000_000
 
 // stressShortestRecord is less than the length of any valid record line (at least 165 bytes), so a stress file of
 // n bytes holds fewer than n/stressShortestRecord valid records.
@@ -65,15 +65,21 @@ func TestStress24GB(t *testing.T) {
 	// Return the reference data (about 3 GB at 24 GB) to the OS before the runs. Under memory pressure macOS
 	// compresses some of the binary's pages, which Maxrss does not count, so pressure makes the RSS check read low.
 	debug.FreeOSMemory()
+	// The RSS bounds rest on measurements at 24 GB (128M valid records) on an Apple M4:
+	//   - latency_ms has few distinct values, so the tracker stays in distinct mode. Peak RSS was 7.5 MiB against
+	//     the 64 MiB bound; storing every value would take about 977 MiB, which the bound catches.
+	//   - duration_us is all distinct, so the tracker switches to heaps at 8 B per value. The binary run alone
+	//     peaked at 988.6 MiB, about 8.1 B per value, against the bound 8·n·1.25 + 64 MiB (1285.2 MiB).
+	// minRSS is the least the run can truly need: 8 B per value once the heaps hold every value.
 	for _, c := range []struct {
-		q, field string
-		want     []string
-		maxRSS   int64
+		q, field       string
+		want           []string
+		minRSS, maxRSS int64
 	}{
-		{"0.99", "latency_ms", f.latency, 64 << 20},
-		{"0.5", "duration_us", f.duration, int64(8*float64(f.valid)*1.25) + 64<<20},
+		{"0.99", "latency_ms", f.latency, 0, 64 << 20},
+		{"0.5", "duration_us", f.duration, 8 * int64(f.valid), int64(8*float64(f.valid)*1.25) + 64<<20},
 	} {
-		t.Run(c.field, func(t *testing.T) { runStress(t, path, f, c.q, c.field, c.want, c.maxRSS) })
+		t.Run(c.field, func(t *testing.T) { runStress(t, path, f, c.q, c.field, c.want, c.minRSS, c.maxRSS) })
 	}
 }
 
@@ -222,8 +228,9 @@ func histValue(hist []int, i int) float64 {
 }
 
 // runStress runs the binary with q and field on the stress file f at path, streaming its stdout, and checks the
-// exit code, the line count, the lines at f's checkpoints against want, the skipped count and the peak RSS.
-func runStress(t *testing.T, path string, f stressFile, q, field string, want []string, maxRSS int64) {
+// exit code, the line count, the lines at f's checkpoints against want, the skipped count and the peak RSS against
+// maxRSS. A peak RSS below minRSS, the least the run truly needs, is logged as a low reading.
+func runStress(t *testing.T, path string, f stressFile, q, field string, want []string, minRSS, maxRSS int64) {
 	cmd := exec.Command(binaryPath, q, field)
 	cmd.Stdin = strings.NewReader(path + "\n")
 	var stderr bytes.Buffer
@@ -236,6 +243,7 @@ func runStress(t *testing.T, path string, f stressFile, q, field string, want []
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	peakRSS := watchPeakRSS(cmd.Process)
 	sc := bufio.NewScanner(stdout)
 	sc.Buffer(make([]byte, 1<<20), 1<<20) // big reads keep the pipe drained
 	n, next := 0, 0
@@ -272,12 +280,17 @@ func runStress(t *testing.T, path string, f stressFile, q, field string, want []
 	}
 	t.Logf("%s %s: %d lines in %v, %.0f MB/s, %.0f records/s", q, field, n, elapsed.Round(time.Millisecond),
 		float64(f.size)/1e6/elapsed.Seconds(), float64(n)/elapsed.Seconds())
-	rss, ok := peakRSSBytes(cmd.ProcessState)
+	rss, ok := peakRSS(cmd.ProcessState)
 	if !ok {
-		t.Log("peak RSS is not available on this OS, so it is not checked")
+		t.Log("peak RSS is not available, so it is not checked")
 		return
 	}
 	t.Logf("peak RSS %.1f MiB, bound %.1f MiB", float64(rss)/(1<<20), float64(maxRSS)/(1<<20))
+	if rss < minRSS {
+		t.Logf("note: peak RSS reads below the %.1f MiB (8 B per value) the heaps need, so some of the binary's "+
+			"pages were compressed or swapped out (macOS memory compression); the true peak is higher",
+			float64(minRSS)/(1<<20))
+	}
 	if rss > maxRSS {
 		t.Errorf("peak RSS is %d bytes, want at most %d", rss, maxRSS)
 	}
