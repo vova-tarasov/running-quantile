@@ -1,7 +1,7 @@
 # running-quantile
 
 [![CI](https://github.com/vova-tarasov/running-quantile/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vova-tarasov/running-quantile/actions/workflows/ci.yml)
-[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fvova-tarasov%2Frunning-quantile%2Fbadges%2Fcoverage.json)](https://github.com/vova-tarasov/running-quantile/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fvova-tarasov%2Frunning-quantile%2Fbadges%2Fcoverage.json&label=coverage)](https://github.com/vova-tarasov/running-quantile/actions/workflows/ci.yml)
 
 A command-line tool that reads a JSON Lines file and, after every valid record, prints the **exact** q-quantile of
 one numeric field over all the valid records so far. Written in Go 1.26 with the standard library only; it runs on
@@ -22,8 +22,8 @@ flowchart LR
 - Each line is checked against the full JSON grammar in one pass, without allocating memory. A record that is
   broken, lacks the field or holds something other than a number is skipped and reported, never fatal.
 - The quantile is exact: linear interpolation between the two nearest values, the default in numpy and R. The
-  tracker stores each distinct value once with a count, and switches to two heaps at 8 bytes per value only when
-  most values are unique.
+  tracker stores each distinct value once with a count, and switches to two heaps at 8 bytes per value once
+  that costs no more memory, which happens when about one value in six or more is new.
 
 The full explanation, with more diagrams, is in [docs/how-it-works.md](docs/how-it-works.md).
 
@@ -108,7 +108,7 @@ skipped 3 invalid records
 | Code | When |
 |---|---|
 | 0 | success, even if records were skipped |
-| 1 | the file can't be opened or read, or stdout can't be written |
+| 1 | no usable path on stdin, the file can't be opened or read, or stdout can't be written |
 | 2 | bad arguments, for example `q` outside [0, 1] |
 
 ## Benchmarks
@@ -129,8 +129,8 @@ A 24 GB file of 128M records, generated and checked by `make stress`:
 | `latency_ms`, 0.99 | integers, few distinct | 34.1 s | 704 MB/s | 8.6 MiB |
 | `duration_us`, 0.5 | random floats, all distinct | 48.7 s | 493 MB/s | 981 MiB |
 
-An exact answer needs every distinct value, so 128M distinct floats take at least 977 MiB; the heaps use 8.04
-bytes per value. How these were measured, and more numbers, are in
+An exact answer needs every distinct value, so 128M distinct floats take at least 977 MiB; the whole process
+peaks at 8.04 bytes per value. How these were measured, and more numbers, are in
 [docs/how-it-works.md](docs/how-it-works.md#performance-and-memory).
 
 ## Development

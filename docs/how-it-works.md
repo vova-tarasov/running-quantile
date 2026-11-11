@@ -23,7 +23,8 @@ version: what it does, how to run it, and the headline numbers.
 - Every line is fully validated as JSON by a hand-written scanner that allocates no memory. Broken records are
   skipped and reported; they never stop the run.
 - The answer is exact. For q = 0 and q = 1 that takes O(1) memory. For any other q the tracker keeps one count per
-  distinct value, and moves to two heaps of 8 bytes per value only when most values are unique.
+  distinct value, and moves to two heaps of 8 bytes per value once that
+  costs no more memory, which happens when about one value in six or more is new.
 - Output is formatted the way `encoding/json` prints a float64 and written through a 1 MiB buffer.
 - On an Apple M4 it processes 500–700 MB/s of JSON Lines. A 24 GB file of 128M records takes 34–49 s.
 
@@ -74,7 +75,7 @@ flowchart TD
     scan -->|float64| track["tracker: Add, then Quantile"]
     track --> fmt["appendFloat: format into<br/>the 1 MiB output buffer"]
     fmt --> read
-    read -->|end of file| done["flush stdout, print the skipped count,<br/>exit 0"]
+    read -->|"end of file"| done["flush stdout, print the skipped count,<br/>exit 0"]
 ```
 
 1. **The path.** Only the first line of stdin is read, at most 4096 bytes, and the program goes on as soon as
@@ -155,8 +156,8 @@ flowchart LR
 
 ### Distinct mode
 
-Real metrics repeat. A latency in whole milliseconds takes a few hundred different values even over a hundred
-million records, so storing every copy would waste memory. For 0 < q < 1 the tracker therefore starts by storing
+Real metrics repeat. A latency in whole milliseconds takes about a thousand different values even over a
+hundred million records, so storing every copy would waste memory. For 0 < q < 1 the tracker therefore starts by storing
 each distinct value once, with a count.
 
 An example with 10 values and q = 0.75 (h = 6.75, so k = 6 and f = 0.75):
@@ -549,7 +550,7 @@ on the `badges` branch, which the README's coverage badge reads.
 ### What the tests cover
 
 `make test` runs every suite below except the coverage gate, the Linux runs and the stress test; the fuzz targets
-run only their seed corpus there. All tests use only the standard library. `make test` runs 54 test functions and
+run only their seed corpus there. All tests use only the standard library. `make test` runs 55 test functions and
 the seed corpora of 3 fuzz targets. Besides those, `TestMain` builds the binary, and the stress-tagged
 `TestStress24GB` runs only under `make stress`. There are 4 benchmarks.
 
