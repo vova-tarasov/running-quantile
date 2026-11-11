@@ -1,25 +1,32 @@
 # running-quantile
 
 `running-quantile` reads a JSON Lines file and, after every valid record, prints the **exact** q-quantile of one
-numeric field over all the valid records seen so far.
+numeric field over all the valid records seen so far. It is written in Go 1.26 and uses only the standard library.
+
+## What it does
 
 ```
 echo /abs/path/file.jsonl | ./running-quantile <q> <field>
 ```
 
-It is written in Go 1.26 and uses only the standard library.
+- `q` is a number in [0, 1], and `field` is the name of a top-level numeric field.
+- The path of the JSON Lines file is read from the first line of stdin.
+- For every valid record, one line goes to stdout: the q-quantile of `field` over all valid records so far.
+- Records that are malformed, lack the field, or hold something other than a number are skipped. They are counted
+  and reported on stderr, and they never change the exit code (see [Input handling](#input-handling)).
 
-## Build, run, test
+The example from the task, saved as `/tmp/example.jsonl`:
 
-| Command | What it does |
-|---|---|
-| `make build` | builds `./running-quantile` (`go build -o running-quantile .`) |
-| `make test` | checks gofmt, runs `go vet` (also with the `stress` build tag), then `go test ./...` |
-| `make cover` | runs the tests with a coverage profile and prints the coverage of every function |
-| `make bench` | runs the benchmarks |
-| `make clean` | removes the binary and the coverage profile |
+```
+{"timestamp": "2026-06-18T10:00:01Z", "customer_id": "acme", "region": "us-east", "endpoint": "/api/v1/query", "latency_ms": 5, "bytes_sent": 8421}
+{"timestamp": "2026-06-18T10:00:02Z", "customer_id": "acme", "region": "us-east", "endpoint": "/api/v1/query", "latency_ms": 3, "bytes_sent": 9102}
+{"timestamp": "2026-06-18T10:00:03Z", "customer_id": "acme", "region": "us-west", "endpoint": "/api/v1/insert", "latency_ms": 8, "bytes_sent": 8950}
+{"timestamp": "2026-06-18T10:00:04Z", "customer_id": "globex", "region": "us-east", "endpoint": "/api/v1/query", "latency_ms": 1, "bytes_sent": 7200}
+{"timestamp": "2026-06-18T10:00:05Z", "customer_id": "acme", "region": "us-east", "endpoint": "/api/v1/query", "latency_ms": 9, "bytes_sent": 5600}
+{"timestamp": "2026-06-18T10:00:06Z", "customer_id": "globex", "region": "us-west", "endpoint": "/api/v1/insert", "latency_ms": 4, "bytes_sent": 7800}
+```
 
-With the six records from the task saved in `/tmp/example.jsonl`:
+With q = 0.75 and the field `latency_ms`, it prints the output the task expects:
 
 ```
 $ make build
@@ -32,14 +39,27 @@ $ echo /tmp/example.jsonl | ./running-quantile 0.75 latency_ms
 7.25
 ```
 
-`go test ./...` covers:
-- unit tests for every file;
-- the trackers, checked after every insert against a sort-and-interpolate reference;
-- the JSON scanner, checked against `encoding/json` by a fuzz test (its seed corpus runs on every `go test`);
-- the whole program through `run(args, stdin, stdout, stderr)` (and `process` for a read error): the task's
-  example, every argument case, every input-file error, each skip reason, the warning cap, the line-ending
-  variants, and read and write errors;
-- the real binary, built once into a temporary directory and run as a subprocess.
+## Build, run, test
+
+It needs Go 1.26 and nothing else: there are no dependencies, so `go build` is the whole build. It was developed with
+Go 1.26.0 on macOS (arm64) and checked on Linux (arm64 and amd64) with the `golang:1.26` Docker image (Go 1.26.11).
+The Makefile uses only POSIX make and shell features. It was run with GNU make 3.81 (macOS) and 4.4.1 (Linux);
+BSD make was not tried.
+
+| Command | What it does |
+|---|---|
+| `make build` | builds `./running-quantile` (`go build -o running-quantile .`) |
+| `make test` | fails if a file needs `gofmt`, runs `go vet` (also with the `stress` build tag), then `go test ./...` (about 1 s of tests) |
+| `make cover` | runs the tests with a coverage profile, prints the coverage of every function, and fails if any function except `main` is below 100.0% |
+| `make bench` | runs the benchmarks (see [Performance and memory](#performance-and-memory)) |
+| `make fuzz` | runs each of the three fuzz targets for `FUZZTIME`, 60 s by default (`make fuzz FUZZTIME=10m`) |
+| `make stress` | runs the on-demand stress test: a seeded file of up to 24 GB, two runs of the binary, about 2 minutes on an M4 (see [Testing](#testing)) |
+| `make clean` | removes the binary and the coverage profile |
+
+The stress test writes its file to the temporary directory (`TMPDIR` picks another one) and deletes it afterwards. At
+the full 24 GB it needs 24 GB of free disk, and about 3 GB of memory for the reference values in the test process.
+`RQ_STRESS_BYTES` sets a smaller size, from 1 to 24000000000 bytes: `RQ_STRESS_BYTES=200000000 make stress` takes
+about a second.
 
 ## The quantile
 
@@ -68,6 +88,83 @@ The whole example (q = 0.75, field `latency_ms`):
 | 4 | 1 | 1 3 5 8 | 2.25 | 5 + 0.25 · (8 − 5) = 5.75 |
 | 5 | 9 | 1 3 5 8 9 | 3 | 8 |
 | 6 | 4 | 1 3 4 5 8 9 | 3.75 | 5 + 0.75 · (8 − 5) = 7.25 |
+
+## Algorithm
+
+A single goroutine handles each record in four steps. That is the least total CPU work per record; a multi-core
+pipeline is described under [Possible extensions](#possible-extensions).
+
+1. **Reading.** A `bufio.Reader` with a 1 MiB buffer returns lines with `ReadSlice`, so lines up to 1 MiB are
+   never copied. Longer lines are assembled in a reused side buffer up to the 64 MiB cap. Beyond the cap, the
+   rest of the line is read and dropped without storing it, so a huge line can't exhaust memory.
+2. **Scanning.** A hand-written scanner makes one pass over the line. It validates the whole line against the
+   JSON grammar (RFC 8259) and remembers the value of the last top-level key equal to the field.
+   - A key's plain ASCII bytes are compared with the field directly, stopping at the first difference. From the
+     first backslash or non-ASCII byte on, the rest of the key is decoded the way `encoding/json` decodes it
+     (escapes, surrogate pairs, U+FFFD for lone surrogates and invalid UTF-8) and compared as it is decoded.
+   - Nested objects and arrays are validated and skipped, with nesting capped at 10,000 levels so recursion can't
+     overflow the stack.
+   - An integer of at most 15 digits (no fraction or exponent) is converted directly. That is exact, because
+     10^15 < 2^53, so it gives the same float64 as `strconv.ParseFloat`. Any other number's bytes go to
+     `strconv.ParseFloat`.
+3. **Tracking.** The value is added to a tracker, which returns the current quantile.
+4. **Writing.** The quantile is formatted straight into the free space of a 1 MiB `bufio.Writer`
+   (`AvailableBuffer`).
+
+The line reader, the scanner and the formatter are each tested to allocate nothing per record.
+
+### Trackers
+
+An exact quantile needs Ω(n) memory in general, because any value seen so far can become the answer later. The
+trackers keep that memory as small as the data allows:
+
+| q | Structure | Memory | Time per record |
+|---|---|---|---|
+| 0 | running minimum | O(1) | O(1) |
+| 1 | running maximum | O(1) | O(1) |
+| other, few distinct values | distinct mode: a count per distinct value, plus two heaps of the distinct values | about 46 bytes per distinct value | O(log d), amortized (map growth) |
+| other, many distinct values | two heaps of all values | 8 bytes per value | O(log n) |
+
+Here d is the number of distinct values and n the number of values. Reading the quantile is O(1) in every mode.
+For 0 < q < 1 the tracker starts in **distinct mode** and may switch once to **two heaps**; the switch is one O(n)
+pass. Scanning a record is O(length of the line), with O(1) memory beyond the buffers.
+
+#### Distinct mode
+
+- Each distinct value is stored once with a count in a `map[float64]int`. A cursor marks the distinct value
+  that holds x[k], together with its count and `below`, the number of values smaller than it.
+- Distinct values below the cursor sit in a max-heap and larger ones in a min-heap, so moving the cursor one
+  distinct value is one pop and one push. Add is O(log d).
+- Memory follows d, not n: about 46 bytes per distinct value (`bytesPerDistinct`). It was measured by adding 1M
+  distinct values to a distinct tracker and taking the live heap after a GC: 45.85 B per value, rounded up.
+  (`TotalAlloc` says 83.65 B, because it also counts the map tables discarded as the map grows.)
+
+#### The switch to heaps
+
+- After each Add the tracker switches when `d > distinctFloor && 8·n ≤ bytesPerDistinct·d`, that is, when
+  storing every value (8 B each) would cost no more than the distinct structure. `distinctFloor` is 2^16, so
+  small inputs never pay for the switch.
+- The check is O(1). The switch itself is one O(n) pass that splits the values into the two heaps
+  (the cursor value's copies up to rank k go to `low`, the rest to `high`) and heapifies them.
+- It is one-way: once switched, the tracker never returns to distinct mode.
+- While it runs, the distinct structure and the new heaps both exist, so memory briefly peaks at about 2× the
+  distinct structure.
+
+#### Heaps
+
+A max-heap `low` holds the k+1 smallest values and a min-heap `high` holds the rest, so x[k] is the top of `low`
+and x[k+1] is the top of `high`.
+
+- **Add** pushes the value onto the heap it belongs to, then moves tops from one heap to the other until `low`
+  holds exactly k+1 values for the new n. k = floor((n − 1) · q) grows by at most one per record, so that is at
+  most one move and Add is O(log n). (Float64 rounding could in principle make k jump by two, so the code loops
+  instead of assuming a single move.)
+- **Quantile** reads the two tops and interpolates: O(1).
+- The heaps store each value once, as a float64, in fixed-size chunks of 64 KiB (8192 values), not one growing
+  slice. A slice that grows copies everything into a bigger array and leaves the old one as garbage; chunks are
+  allocated once and never copied, so memory stays about 1× the data. A test checks that 2^20 pushes allocate at
+  most 1.1× the bytes stored.
+- `container/heap` is not used, because it boxes every value in an interface.
 
 ## Input handling
 
@@ -181,85 +278,18 @@ skipped 2 invalid records
 | 1 | I/O error (stdin, open, read, or write) |
 | 2 | bad arguments |
 
-## How it works
-
-A single goroutine handles each record in four steps:
-
-1. **Reading.** A `bufio.Reader` with a 1 MiB buffer returns lines with `ReadSlice`, so lines up to 1 MiB are
-   never copied. Longer lines are assembled in a reused side buffer up to the 64 MiB cap. Beyond the cap, the
-   rest of the line is read and dropped without storing it, so a huge line can't exhaust memory.
-2. **Scanning.** A hand-written scanner makes one pass over the line. It validates the whole line against the
-   JSON grammar (RFC 8259) and remembers the value of the last top-level key equal to the field.
-   - A key's plain ASCII bytes are compared with the field directly, stopping at the first difference. From the
-     first backslash or non-ASCII byte on, the rest of the key is decoded the way `encoding/json` decodes it
-     (escapes, surrogate pairs, U+FFFD for lone surrogates and invalid UTF-8) and compared as it is decoded.
-   - Nested objects and arrays are validated and skipped, with nesting capped at 10,000 levels so recursion can't
-     overflow the stack.
-   - An integer of at most 15 digits (no fraction or exponent) is converted directly. That is exact, because
-     10^15 < 2^53, so it gives the same float64 as `strconv.ParseFloat`. Any other number's bytes go to
-     `strconv.ParseFloat`.
-3. **Tracking.** The value is added to a tracker, which returns the current quantile.
-4. **Writing.** The quantile is formatted straight into the free space of a 1 MiB `bufio.Writer`
-   (`AvailableBuffer`).
-
-The line reader, the scanner and the formatter are each tested to allocate nothing per record.
-
-### Trackers
-
-| q | Structure | Memory | Time per record |
-|---|---|---|---|
-| 0 | running minimum | O(1) | O(1) |
-| 1 | running maximum | O(1) | O(1) |
-| other, few distinct values | distinct mode: a count per distinct value, plus two heaps of the distinct values | about 46 bytes per distinct value | O(log d) |
-| other, many distinct values | two heaps | 8 bytes per value | O(log n) |
-
-For 0 < q < 1 the tracker starts in **distinct mode** and may switch once to **two heaps**.
-
-#### Distinct mode
-
-- Each distinct value is stored once with a count in a `map[float64]int`. A cursor marks the distinct value
-  that holds x[k], together with its count and `below`, the number of values smaller than it.
-- Distinct values below the cursor sit in a max-heap and larger ones in a min-heap, so moving the cursor one
-  distinct value is one pop and one push. Add is O(log d), where d is the number of distinct values.
-- Memory follows d, not n: about 46 bytes per distinct value (`bytesPerDistinct`), measured by adding 1M
-  distinct values and taking the live heap after a GC (45.85 B, rounded up; `TotalAlloc` says 83.65 B because
-  it also counts the map tables discarded as the map grows).
-
-#### The switch to heaps
-
-- After each Add the tracker switches when `d > distinctFloor && 8·n ≤ bytesPerDistinct·d`, that is, when
-  storing every value (8 B each) would cost no more than the distinct structure. `distinctFloor` is 2^16, so
-  small inputs never pay for the switch.
-- The check is O(1). The switch itself is one O(n) pass that splits the values into the two heaps
-  (the cursor value's copies up to rank k go to `low`, the rest to `high`) and heapifies them.
-- It is one-way: once switched, the tracker never returns to distinct mode.
-- While it runs, the distinct structure and the new heaps both exist, so memory briefly peaks at about 2× the
-  distinct structure.
-
-#### Heaps
-
-The heaps work like this: a max-heap `low` holds the k+1 smallest values and a min-heap `high` holds the rest, so x[k] is
-the top of `low` and x[k+1] is the top of `high`.
-
-- **Add** pushes the value onto the heap it belongs to, then moves tops from one heap to the other until `low`
-  holds exactly k+1 values for the new n. k = floor((n − 1) · q) grows by at most one per record, so that is at
-  most one move and Add is O(log n). (Float64 rounding could in principle make k jump by two, so the code loops
-  instead of assuming a single move.)
-- **Quantile** reads the two tops and interpolates: O(1).
-- An exact quantile needs Ω(n) memory in general, because any stored value can become the answer later.
-  The heaps store each value once, as a float64.
-- The heaps keep their values in fixed-size chunks of 64 KiB (8192 values), not one growing slice. A slice that
-  grows copies everything into a bigger array and leaves the old one as garbage; chunks are allocated once and
-  never copied, so memory stays about 1× the data. A test checks that 2^20 pushes allocate at most 1.1× the
-  bytes stored.
-- `container/heap` is not used, because it boxes every value in an interface.
-
 ## Numerics
 
 - **h is computed in float64.** `(n − 1) · q` can land just below an integer. For the values 0 … 100 and
   q = 0.29, h = 100 · 0.29 = 28.999999999999996, so k = 28 and f ≈ 1, and the program prints
   `28.999999999999996` where exact arithmetic gives 29. A result can therefore differ from other tools in the
   last digits.
+- **The same output on every platform.** Go may fuse a multiplication and the addition after it into one FMA
+  instruction, which rounds once instead of twice. It does so on arm64 (and on amd64 with `GOAMD64=v3`). So
+  `rank` and `lerp` round each product to float64 with an explicit conversion, which forbids the fusion. Without
+  it, an arm64 build and an amd64 build disagreed in the last digit on 2–32% of 100,000 output lines at q = 0.1,
+  0.29, 0.9, 0.95 and 0.99 (none at 0.5 and 0.75, where the products are exact). With it, their output is
+  identical. `TestRank` and `TestLerp` pin the rounded results, and they fail on arm64 without the conversions.
 - **Integers above 2^53** are rounded to the nearest float64 when parsed. The quantile is exact for the parsed
   values.
 - **Underflow.** A number too small for float64 (`1e-400`) becomes 0, as `strconv.ParseFloat` returns it. The
@@ -269,9 +299,73 @@ the top of `low` and x[k+1] is the top of `high`.
 - **Negative zero.** `-0` is read as 0, so it is never printed.
 - JSON has no NaN or infinity, so every value is finite and the ordering is total.
 
-## Performance
+## Performance and memory
 
-Measured on an Apple M4, Go 1.26.0, macOS. The program runs on one core. `make bench` runs these benchmarks:
+Measured on an Apple M4 (10 cores, 32 GB of RAM), macOS (Darwin 27.2), Go 1.26.0. The program runs on one core.
+
+### The 24 GB runs
+
+`make stress` writes a seeded file of 23,999,999,997 bytes with 128,312,439 lines:
+
+- 128,055,557 valid records shaped like the task's example, plus a `duration_us` field that holds a random float
+  (all distinct). `latency_ms` is `int(exp(3 + 0.8·N(0,1)))`, so it has few distinct values;
+- 128,184 invalid lines (one in 1000), cycling through malformed JSON, not an object, missing field, not a number
+  and out of float64 range;
+- 128,698 blank lines (one in 997).
+
+It runs the binary twice on that file, streams and checks its output, and logs the time. The file is read from
+the page cache or the disk, and the test reads every output line through a pipe. The test ran twice, both times
+passing every check: once when it was written (run 1), and once on the final code (run 2).
+
+| Run | Field and q | Wall time | Throughput | Records/s | Peak RSS as read in the test |
+|---|---|---|---|---|---|
+| 1 | `latency_ms`, 0.99 | 33.7 s | 712 MB/s | 3.80 M | 7.5 MiB |
+| 1 | `duration_us`, 0.5 | 48.8 s | 492 MB/s | 2.62 M | 507.5 MiB (too low, see below) |
+| 2 | `latency_ms`, 0.99 | 34.1 s | 704 MB/s | 3.76 M | 7.4 MiB |
+| 2 | `duration_us`, 0.5 | 48.7 s | 493 MB/s | 2.63 M | 486.0 MiB (too low, see below) |
+
+The `duration_us` readings in the test are too low: 128M float64 values alone take 977 MiB. The machine was
+already using 4 GB of swap, and the test adds 24 GB of file cache, plus about 3 GB of reference data while it
+computes the expected output. So macOS compressed part of the binary's heap (about 928,000 page compressions
+during run 2), and Maxrss does not count compressed pages. The true peak comes from running the binary alone on
+the same file, with `echo <file> | /usr/bin/time -l ./running-quantile <q> <field> | tail -1` (about 47,000
+compressions during the `duration_us` run):
+
+| Field and q | Max RSS | Peak memory footprint | Per value |
+|---|---|---|---|
+| `latency_ms`, 0.99 | 8.6 MiB | 7.1 MiB | (distinct mode: memory follows the distinct values) |
+| `duration_us`, 0.5 | 981.4 MiB | 988.5 MiB | 8.04 B (Max RSS) |
+
+The peak memory footprint is macOS's count that includes compressed pages. A standalone run after run 1 gave
+988.6 MiB of Max RSS for `duration_us`. The stress test asserts at most 64 MiB for `latency_ms` (storing every
+value would take 977 MiB) and at most 8·n·1.25 + 64 MiB = 1285.2 MiB for `duration_us`, and it logs a note when
+the `duration_us` reading is below 8 bytes per value.
+
+On Linux, in a linux/arm64 container on the same M4, `RQ_STRESS_BYTES=3000000000 make stress` (16,006,870 valid
+records) passes with 703 MB/s and 4.9 MiB for `latency_ms`, and 523 MB/s and 127.9 MiB for `duration_us`
+(8.4 B per value, including the runtime and buffers). GNU `time` reports 127.4 MiB for the binary on 16,006,870
+other random values. See [Testing](#testing) for how the test reads peak RSS on Linux.
+
+### Where the time goes
+
+From the benchmark medians below:
+
+| Part | ns per record | Benchmark |
+|---|---|---|
+| scanning the task's 147-byte record | 130 | `BenchmarkExtractNumber/pdf` |
+| tracker Add + Quantile, few distinct values | 22 | `BenchmarkTrackerAdd`, distinct, ints |
+| formatting the quantile | 21 | `BenchmarkAppendFloat` |
+| the whole pipeline, 1M records from memory | 218 | `BenchmarkProcess` |
+
+Scanning is about 60% of the time. The remaining ~45 ns go to splitting lines, the blank-line check and the
+buffered write; they were not measured separately. The 24 GB `latency_ms` run takes 266 ns per line end to end;
+that includes reading the file and the pipe to the test. The `duration_us` run takes 380 ns per line: its values
+take the `strconv.ParseFloat` path, its output lines are longer, and its heaps grow to about 1 GB. These three
+causes were not measured separately.
+
+### Benchmarks
+
+`make bench` runs these benchmarks:
 
 - `BenchmarkExtractNumber`: one record, either the task's 147-byte example line (`pdf`) or the same line with the
   `latency_ms` key written with an escape (`escaped-key`), which takes the decoding path.
@@ -280,6 +374,9 @@ Measured on an Apple M4, Go 1.26.0, macOS. The program runs on one core. `make b
   tracker grows from 0 to 2^20 values and is then replaced.
 - `BenchmarkProcess`: the whole pipeline over 1M records shaped like the task's example (153 MB, held in memory),
   on `latency_ms`.
+
+Absolute numbers drift by about 2% between sessions. For example, `BenchmarkExtractNumber/pdf` before the
+performance pass read 148.2 ns in one session and 151.3 ns in another. So compare numbers within one table only.
 
 Each number is a median. For the buffer sizes it is the median of 6 runs per size. The buffer sizes were also
 checked end to end: the binary on a 1.53 GB file of 10M such records (warm page cache, stdout to `/dev/null`),
@@ -295,7 +392,7 @@ each, so drift affects both sides equally. Each change was measured on top of th
 | `keyEquals` in one loop: compare plain ASCII bytes with the field as they are scanned, stop at the first difference | `pdf` 144.2 ns, `escaped-key` 168.5 ns, `BenchmarkProcess` 231.5 ns per record | 131.0 ns, 155.0 ns, 217.2 ns | yes |
 | `keyEquals` decodes from the end of the matching ASCII prefix instead of from the start of the key | `pdf` 130.8 ns, `escaped-key` 154.6 ns | 130.9 ns, 139.4 ns | yes |
 
-`chunkBits`, `BenchmarkTrackerAdd` in ns per Add (10 alternating runs each):
+`chunkBits`, `BenchmarkTrackerAdd` in ns per Add + Quantile (10 alternating runs each):
 
 | | 12 | **13** | 14 | 16 |
 |---|---|---|---|---|
@@ -326,6 +423,14 @@ The formatter and the trackers did not change, and their numbers differ only by 
 27 allocations per run of 1M records, and `TestProcessAllocationsDoNotGrowWithRecords` checks that 101k records
 make at most 10 more allocations than 1k records.
 
+The explicit float64 rounding in `rank` and `lerp` (see [Numerics](#numerics)) came after this pass. Five
+alternating runs of each version show no difference beyond noise:
+
+| Benchmark | Fused (before) | Rounded (after) |
+|---|---|---|
+| `BenchmarkProcess` | 217.3 ns per record | 216.4 ns per record |
+| `BenchmarkTrackerAdd`: heaps random, ints; distinct random, ints; adaptive random, ints | 59.6, 56.5, 125.8, 22.0, 64.7, 24.1 ns | 57.8, 56.7, 127.0, 21.8, 64.8, 23.6 ns |
+
 Chosen constants:
 
 | Constant | Value |
@@ -334,3 +439,126 @@ Chosen constants:
 | `writeBufSize` | 1 MiB |
 | `chunkBits` | 13 (8192 values, 64 KiB per chunk) |
 | `maxSmallIntDigits` | 15 |
+| `distinctFloor` | 2^16 |
+| `bytesPerDistinct` | 46 |
+
+## Testing
+
+`make test` runs every suite below except the coverage gate, the Linux runs and the stress test; the fuzz targets
+run only their seed corpus there. All tests use only the standard library. There are 54 test functions, 3 fuzz
+targets and 4 benchmarks.
+
+- **Trackers against a reference** (`quantile_test.go`, `distinct_test.go`, `heap_test.go`).
+  - Every tracker is checked bit for bit, after every Add, against a reference that sorts a copy and applies
+    type 7.
+  - Inputs: normal random floats, small ints with many duplicates, ascending, descending, constant, mixed signs,
+    and ±MaxFloat64 mixed with small values.
+  - q = 0, 5e-324, 0.01, 0.25, 0.5, 0.75, 0.99, 0.9999999999999999, 1, and one seeded random q.
+  - The distinct and adaptive trackers are also checked bit for bit against the heap tracker. That includes the
+    Add that triggers the switch, and a switch while the copies of the cursor value straddle the two heaps.
+  - The heaps pop in sorted order across chunks, heapify correctly, and grow without copying.
+- **Scanner** (`scan_test.go`): valid records, including unusual number spellings (`1E+2`, `-0.0`, `0e0`,
+  `1e-400`, `9007199254740993`, a 300-digit integer, `5e-324`); every skip reason; the nesting limit, exactly
+  where `encoding/json` puts it; the warning texts; the JSON number grammar used for `q`; key decoding (escapes,
+  surrogate pairs, invalid UTF-8); and keys that need escapes or are not ASCII.
+- **Formatting** (`format_test.go`): fixed examples, and random values compared with `json.Marshal`.
+- **Input** (`input_test.go`): the rules for the path line and the 4098-byte read limit; line splitting, CR
+  removal, lines longer than the buffer, a line over the cap that is dropped without being buffered, and read
+  errors.
+- **Fuzzing** (`scan_fuzz_test.go`, `fuzz_test.go`):
+  - `FuzzExtractNumber` compares the scanner with an oracle built from `encoding/json` (`json.Valid`, then
+    `Unmarshal` into `map[string]json.RawMessage`, then `strconv.ParseFloat`). For any line and field, both must
+    give the same verdict and the same value bits.
+  - `FuzzTrackers` checks the adaptive tracker (with a floor of 8 distinct values, so it can switch early), the
+    default tracker and the heap tracker bit for bit against an exact sorted reference. The values are int16, so
+    there are many duplicates.
+  - `FuzzProcess` checks that the pipeline never fails or panics on arbitrary bytes, and writes exactly one
+    parsable number per valid record.
+- **End to end** (`main_test.go`, `pipeline_test.go`): `run(args, stdin, stdout, stderr)` with in-memory streams.
+  - The task's example.
+  - Every rejected argument list, with the exact error and usage, without reading stdin.
+  - Each skip reason with its exact warning and count, and the cap of 10 warnings.
+  - CRLF, the BOM, blank lines, an empty file, long lines, and `-0`.
+  - Every input error: a missing file, a directory, an unreadable file, JSON Lines content piped in instead of a
+    path, and a 4 MiB first line.
+  - A relative path, and a failing stdout.
+  - In `process`: a read error in the middle of the file, and stopping at the first write error (it reads less
+    than 8 MiB of a 16 MB input).
+- **Binary** (`binary_test.go`): the real binary is built once into a temporary directory and run as a
+  subprocess. The tests cover the task's example through the real stdin, exit codes 1 and 2, and not hanging when
+  stdout is closed.
+- **Allocation and memory gates**:
+  - no allocations in the scanner (plain and escaped keys), the formatter and the line reader;
+  - `process` makes at most 10 more allocations for 101k records than for 1k records, and every record must be
+    valid;
+  - heap growth allocates at most 1.1× the bytes stored;
+  - 1M records of 100 distinct values take at most 256 KiB;
+  - q = 0 and q = 1 allocate at most 1 KiB for 1M values;
+  - a 32 MiB line over the cap is dropped without being buffered.
+- **Doc gate** (`doc_test.go`): it parses every `.go` file, including test and build-tagged files, and fails if a
+  function or method has no doc comment that starts with its name.
+- **Coverage gate** (`make cover`): 100.0% of the statements in every function except the one-line `main`
+  (99.7% in total).
+- **Linux**: `make test` passes in the `golang:1.26` image (Go 1.26.11), natively on linux/arm64 and under
+  emulation on linux/amd64:
+
+  ```
+  docker run --rm -v "$PWD":/src -w /src golang:1.26 make test
+  docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src golang:1.26 make test
+  ```
+
+  The container runs as root, so the unreadable-file case is skipped (root can read a file with mode 000). With
+  `--user 1000:1000 -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath` added, it runs and passes on both.
+- **Stress** (`stress_test.go`, build tag `stress`, `make stress`): the 24 GB file described under
+  [Performance and memory](#performance-and-memory). For each run it checks:
+  - exit code 0;
+  - one output line per valid record;
+  - the final `skipped K invalid records` line;
+  - the output at valid records 1, 1M, 10M, 100M and the last one, against a reference computed from the
+    generated values (a histogram for `latency_ms`, a sort for `duration_us`);
+  - peak RSS against the bounds above. On darwin it is the child's Maxrss. On Linux the test polls VmHWM in
+    `/proc/<pid>/status` every 10 ms instead: `os/exec` starts the child with vfork, and the kernel then keeps
+    the parent's peak RSS as the child's Maxrss. A Linux run at 3 GB failed both bounds that way (338.4 MiB for
+    each field, the test process's own peak) before the change.
+
+## Possible extensions
+
+### Approximate quantiles
+
+An exact quantile needs memory that grows with the data. Sketches bound the memory instead, at the cost of
+exactness, so the task's example output could differ.
+
+- **Relative error, as in DDSketch.**
+  - Values are counted in buckets [γ^i, γ^(i+1)), with γ = (1 + α)/(1 − α).
+  - Any quantile it returns, x̃, is within relative error α of the true value x: |x̃ − x| ≤ α·|x|.
+  - It needs about ln(max/min)/ln(γ) ≈ ln(max/min)/(2α) buckets, so memory is O(log(max/min)/α), whatever n is.
+    For example, α = 1% over 1 µs to 1 hour (a range of 3.6·10^9) needs about 1,100 buckets.
+  - Adding a value is O(1), two sketches merge by adding their bucket counts, and zero and negative values need a
+    zero count and a second set of buckets.
+  - It returns a value close to one order statistic, so the type 7 interpolation between two of them is lost.
+- **Rank error, as in Greenwald–Khanna (GK) or KLL.**
+  - The rank of the returned value is within ±εn of the target rank q·n.
+  - GK is deterministic and keeps O((1/ε)·log(εn)) entries.
+  - KLL is randomized and keeps O((1/ε)·log log(1/δ)) entries, where δ is the probability that the bound fails.
+    KLL sketches also merge.
+- **Why rank error is weak for tail latency.** At q = 0.99 and ε = 0.01, any value between the 98th and the
+  100th percentile is a valid answer, so the "p99" may be the maximum. Latency has a long tail. For the stress
+  test's log-normal `latency_ms`, the 98th percentile is about 104 ms against a p99 of 129 ms (from its
+  distribution), and the values above p99 reach much further. A relative error bounds the value itself: with
+  α = 1%, a true p99 of 129 ms is reported as 127.7 to 130.3 ms. Rank-error sketches need ε well below 1 − q for
+  tail quantiles, and memory grows as 1/ε.
+
+### A multi-core parse pipeline
+
+Scanning takes about 130 of the 218 ns per record (see [Where the time goes](#where-the-time-goes)). Each output
+depends on every earlier value, so tracking has to stay in order, but parsing doesn't:
+
+1. A reader cuts the file into blocks of about 1 MiB at line boundaries.
+2. N workers parse blocks in parallel into slices of values, plus the skipped lines and their reasons.
+3. One goroutine takes the blocks in file order, numbers the lines, prints the warnings, feeds the tracker and
+   writes the output.
+
+The ordered stage then costs about 218 − 130 = 88 ns per record, so for `latency_ms` the speed-up is at most
+about 2.5× (Amdahl's law; an estimate from the benchmarks, not a measurement). It costs more total CPU, plus
+memory for the blocks in flight. With all-distinct values the tracker itself (65 ns per record while it grows to
+2^20 values, more at 128M) limits the speed-up further.
