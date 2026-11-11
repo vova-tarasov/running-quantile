@@ -15,11 +15,16 @@ var oracleQs = append([]float64{0, 5e-324, 0.01, 0.25, 0.5, 0.75, 0.99, 0.999999
 func referenceQuantile(seen []float64, q float64) float64 {
 	s := slices.Clone(seen)
 	slices.Sort(s)
-	k, f := rank(len(s), q)
+	return sortedQuantile(s, q)
+}
+
+// sortedQuantile returns the type 7 quantile of sorted, which must be sorted and not empty.
+func sortedQuantile(sorted []float64, q float64) float64 {
+	k, f := rank(len(sorted), q)
 	if f == 0 {
-		return s[k]
+		return sorted[k]
 	}
-	return lerp(s[k], s[k+1], f)
+	return lerp(sorted[k], sorted[k+1], f)
 }
 
 // oracleInputs returns fresh, deterministically seeded generators of test inputs by name; call i sequentially from 0.

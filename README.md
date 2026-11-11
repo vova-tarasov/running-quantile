@@ -478,7 +478,8 @@ the seed corpora of 3 fuzz targets. Besides those, `TestMain` builds the binary,
     default tracker and the heap tracker bit for bit against an exact sorted reference. The values are int16, so
     there are many duplicates.
   - `FuzzProcess` checks that the pipeline never fails or panics on arbitrary bytes, and writes exactly one
-    parsable number per valid record.
+    parsable number per valid record. For the first 2000 valid records, each number must be the median of the
+    valid values so far, formatted by `appendFloat`, so scanner, tracker and formatter are checked together.
 - **End to end** (`main_test.go`, `pipeline_test.go`): `run(args, stdin, stdout, stderr)` with in-memory streams.
   - The task's example.
   - Every rejected argument list, with the exact error and usage, without reading stdin.
@@ -490,8 +491,8 @@ the seed corpora of 3 fuzz targets. Besides those, `TestMain` builds the binary,
   - In `process`: a read error in the middle of the file, and stopping at the first write error (it reads less
     than 8 MiB of a 16 MB input).
 - **Binary** (`binary_test.go`): the real binary is built once into a temporary directory and run as a
-  subprocess. The tests cover the task's example through the real stdin, exit codes 1 and 2, and not hanging when
-  stdout is closed.
+  subprocess. The tests cover the task's example through the real stdin, exit codes 1 and 2, and stopping early
+  when stdout is closed: with ~24 MB of output to write, the binary must die of SIGPIPE within 10 s.
 - **Allocation and memory gates**:
   - no allocations in the scanner (plain and escaped keys), the formatter and the line reader;
   - `process` makes at most 10 more allocations for 101k records than for 1k records, and every record must be

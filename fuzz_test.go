@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// maxFuzzValues bounds the values FuzzTrackers feeds per input so that every exec stays fast.
+// maxFuzzValues bounds the values FuzzTrackers feeds and FuzzProcess checks per input, so that every exec stays fast.
 const maxFuzzValues = 2000
 
 // FuzzTrackers checks that the adaptive, default and heap trackers match the exact quantile bit for bit after every
@@ -35,11 +35,7 @@ func FuzzTrackers(f *testing.F) {
 			v := float64(int16(uint16(data[i])<<8 | uint16(data[i+1])))
 			j, _ := slices.BinarySearch(sorted, v)
 			sorted = slices.Insert(sorted, j, v)
-			k, frac := rank(len(sorted), q)
-			want := sorted[k]
-			if frac != 0 {
-				want = lerp(sorted[k], sorted[k+1], frac)
-			}
+			want := sortedQuantile(sorted, q)
 			for name, tr := range trackers {
 				tr.Add(v)
 				if got := tr.Quantile(); math.Float64bits(got) != math.Float64bits(want) {
@@ -51,22 +47,26 @@ func FuzzTrackers(f *testing.F) {
 }
 
 // FuzzProcess checks that process never panics or fails on arbitrary input, writes one parsable number per valid
-// record, and nothing else.
+// record, and nothing else. For the first maxFuzzValues valid records it also checks that each line is the median of
+// the valid values so far as appendFloat formats it, which covers the scanner -> tracker -> formatter seam.
 func FuzzProcess(f *testing.F) {
 	f.Add([]byte("{\"v\":1}\n{\"v\":2}\n{\"v\":3}\n"), "v")
 	f.Add([]byte("\xef\xbb\xbf{\"v\":1}\r\n\r\n  \t\n{\"v\":-0.0}"), "v")
 	f.Add([]byte("{\"v\":1\n[1]\n{\"w\":1}\n{\"v\":\"x\"}\n{\"v\":1e999}\n{\"v\":2}"), "v")
 	f.Add([]byte("{\"caf\\u00e9\":7}\n{\"café\":8}\n"), "café")
 	f.Fuzz(func(t *testing.T, content []byte, field string) {
+		const q = 0.5
 		var out bytes.Buffer
 		w := bufio.NewWriterSize(&out, 1<<16)
-		if _, err := process(bytes.NewReader(content), 0.5, field, w, io.Discard); err != nil {
+		if _, err := process(bytes.NewReader(content), q, field, w, io.Discard); err != nil {
 			t.Fatalf("process returned %v", err)
 		}
 		if err := w.Flush(); err != nil {
 			t.Fatal(err)
 		}
 		want := 0
+		var sorted []float64   // the first maxFuzzValues valid values, sorted
+		var wantLines []string // the expected output line after each of them
 		for n, line := range bytes.Split(content, []byte("\n")) {
 			line = bytes.TrimSuffix(line, []byte("\r"))
 			if n == 0 {
@@ -75,8 +75,15 @@ func FuzzProcess(f *testing.F) {
 			if len(bytes.TrimLeft(line, " \t\r")) == 0 {
 				continue
 			}
-			if _, r := extractNumber(line, field); r == valid {
-				want++
+			v, r := extractNumber(line, field)
+			if r != valid {
+				continue
+			}
+			want++
+			if len(sorted) < maxFuzzValues {
+				j, _ := slices.BinarySearch(sorted, v)
+				sorted = slices.Insert(sorted, j, v)
+				wantLines = append(wantLines, string(appendFloat(nil, sortedQuantile(sorted, q))))
 			}
 		}
 		got := 0
@@ -88,6 +95,9 @@ func FuzzProcess(f *testing.F) {
 				t.Fatalf("output line %q lacks a newline", l)
 			}
 			l = l[:len(l)-1]
+			if got < len(wantLines) && string(l) != wantLines[got] {
+				t.Fatalf("output line %d is %q, want %q", got+1, l, wantLines[got])
+			}
 			if _, err := strconv.ParseFloat(string(l), 64); err != nil {
 				t.Fatalf("output line %q does not parse: %v", l, err)
 			}

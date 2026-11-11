@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -73,9 +74,10 @@ func TestBinaryExitCodes(t *testing.T) {
 	}
 }
 
-// TestBinaryStopsWhenStdoutClosed checks that the binary does not hang when the reader of its stdout goes away:
-// it must exit within 10 s. The input takes well under a second anyway, so this does not show an early exit;
-// TestProcessStopsOnWriteError shows that process stops reading at the first write error.
+// TestBinaryStopsWhenStdoutClosed checks that the binary stops early when the reader of its stdout goes away. Its
+// ~24 MB of output is far more than a pipe holds, so once the test has read one line and closed the read end, the
+// binary cannot finish: it must die of SIGPIPE on a write to the closed pipe, as Go programs do on macOS and Linux,
+// within 10 s. TestProcessStopsOnWriteError shows that process stops reading at the first write error.
 func TestBinaryStopsWhenStdoutClosed(t *testing.T) {
 	var in []byte
 	for i := range 3_000_000 {
@@ -106,5 +108,8 @@ func TestBinaryStopsWhenStdoutClosed(t *testing.T) {
 		cmd.Process.Kill()
 		<-done
 		t.Fatal("running-quantile did not exit within 10 s after its stdout was closed")
+	}
+	if ws := cmd.ProcessState.Sys().(syscall.WaitStatus); !ws.Signaled() || ws.Signal() != syscall.SIGPIPE {
+		t.Fatalf("running-quantile ended with %q, want it killed by SIGPIPE", cmd.ProcessState)
 	}
 }
