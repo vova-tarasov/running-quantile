@@ -467,9 +467,9 @@ the seed corpora of 3 fuzz targets. Besides those, `TestMain` builds the binary,
   where `encoding/json` puts it; the warning texts; the JSON number grammar used for `q`; key decoding (escapes,
   surrogate pairs, invalid UTF-8); and keys that need escapes or are not ASCII.
 - **Formatting** (`format_test.go`): fixed examples, and random values compared with `json.Marshal`.
-- **Input** (`input_test.go`): the rules for the path line and the 4098-byte read limit; line splitting, CR
-  removal, lines longer than the buffer, a line over the cap that is dropped without being buffered, and read
-  errors.
+- **Input** (`input_test.go`): the rules for the path line, the 4098-byte read limit, and returning as soon as the
+  path line ends instead of waiting for the end of stdin; line splitting, CR removal, lines longer than the buffer,
+  a line over the cap that is dropped without being buffered, and read errors.
 - **Fuzzing** (`scan_fuzz_test.go`, `fuzz_test.go`):
   - `FuzzExtractNumber` compares the scanner with an oracle built from `encoding/json` (`json.Valid`, then
     `Unmarshal` into `map[string]json.RawMessage`, then `strconv.ParseFloat`). For any line and field, both must

@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // countingReader counts the bytes read from the wrapped reader.
@@ -88,6 +89,29 @@ func TestReadPathErrors(t *testing.T) {
 	boom := errors.New("boom")
 	if _, err := readPath(&failingReader{err: boom}); !errors.Is(err, boom) {
 		t.Errorf("read error = %v, want wrapped boom", err)
+	}
+}
+
+// TestReadPathReturnsAtFirstNewline checks that readPath returns as soon as the first line is complete, without
+// waiting for the end of stdin, which an interactive or slow writer may send much later or never.
+func TestReadPathReturnsAtFirstNewline(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	go pw.Write([]byte("/some/path.jsonl\n"))
+	var path string
+	var err error
+	done := make(chan struct{})
+	go func() {
+		path, err = readPath(pr)
+		close(done)
+	}()
+	select {
+	case <-done:
+		if err != nil || path != "/some/path.jsonl" {
+			t.Fatalf("readPath = %q, %v; want \"/some/path.jsonl\"", path, err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("readPath did not return within 1 s of a complete first line; it waits for the end of stdin")
 	}
 }
 

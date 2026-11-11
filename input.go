@@ -14,15 +14,16 @@ const maxPathBytes = 4096
 // errLineTooLong reports a line whose content exceeds the line limit.
 var errLineTooLong = errors.New("line too long")
 
-// readPath returns the first line of stdin, without its line ending, reading at most maxPathBytes+2 bytes.
+// readPath returns the first line of stdin, without its line ending. It returns as soon as that line is complete,
+// without waiting for the end of stdin, and reads at most maxPathBytes+2 bytes.
 func readPath(stdin io.Reader) (string, error) {
-	data, err := io.ReadAll(io.LimitReader(stdin, maxPathBytes+2))
-	if err != nil {
+	br := bufio.NewReaderSize(io.LimitReader(stdin, maxPathBytes+2), maxPathBytes+2)
+	line, err := br.ReadSlice('\n')
+	if err != nil && err != io.EOF && err != bufio.ErrBufferFull {
 		return "", fmt.Errorf("reading file path from stdin: %w", err)
 	}
-	line := data
-	if i := bytes.IndexByte(data, '\n'); i >= 0 {
-		line = bytes.TrimSuffix(data[:i], []byte("\r"))
+	if n := len(line); n > 0 && line[n-1] == '\n' {
+		line = bytes.TrimSuffix(line[:n-1], []byte("\r"))
 	}
 	if len(line) > maxPathBytes {
 		return "", errors.New("first line of stdin is longer than 4096 bytes; expected a file path")
