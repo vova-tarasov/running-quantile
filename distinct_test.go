@@ -105,3 +105,86 @@ func TestDistinctMemoryFollowsDistinctValues(t *testing.T) {
 		t.Errorf("distinct=%d n=%d", d.distinct(), d.n)
 	}
 }
+
+// TestAdaptiveMatchesHeapsBitForBit checks the adaptive tracker against the heap tracker after every Add,
+// including the Add that triggers the switch.
+func TestAdaptiveMatchesHeapsBitForBit(t *testing.T) {
+	for name := range distinctInputs() {
+		for _, q := range oracleQs {
+			ga, gh := distinctInputs()[name], distinctInputs()[name]
+			a, h := newAdaptiveTracker(q, 64), newHeapTracker(q)
+			for i := 0; i < 3000; i++ {
+				a.Add(ga(i))
+				h.Add(gh(i))
+				if got, want := a.Quantile(), h.Quantile(); math.Float64bits(got) != math.Float64bits(want) {
+					t.Fatalf("%s q=%v after %d adds: got %v, want %v", name, q, i+1, got, want)
+				}
+			}
+		}
+	}
+}
+
+// TestAdaptiveSwitchesOnHighCardinality checks that 1000 distinct values switch to heaps once past the floor.
+func TestAdaptiveSwitchesOnHighCardinality(t *testing.T) {
+	a := newAdaptiveTracker(0.5, 64)
+	for i := 0; i < 1000; i++ {
+		a.Add(float64(i))
+	}
+	if !a.switched() {
+		t.Error("want switched after 1000 distinct values")
+	}
+}
+
+// TestAdaptiveStaysDistinctOnLowCardinality checks that 100k records of 50 distinct values never switch.
+func TestAdaptiveStaysDistinctOnLowCardinality(t *testing.T) {
+	a := newAdaptiveTracker(0.5, 64)
+	for i := 0; i < 100_000; i++ {
+		a.Add(float64(i % 50))
+	}
+	if a.switched() {
+		t.Error("want distinct mode")
+	}
+}
+
+// TestAdaptiveStaysDistinctWhenHeapsWouldBeBigger checks that heavy repetition keeps distinct mode even past
+// the floor.
+func TestAdaptiveStaysDistinctWhenHeapsWouldBeBigger(t *testing.T) {
+	a := newAdaptiveTracker(0.5, 64)
+	for i := 0; i < 10_000; i++ {
+		a.Add(float64(i % 64))
+	}
+	for i := 0; i < 100; i++ {
+		a.Add(float64(1000 + i))
+	}
+	if a.switched() {
+		t.Error("want distinct mode")
+	}
+}
+
+// TestAdaptiveSwitchSplitsCursorCopies checks a switch while the cursor value's copies straddle low and high.
+func TestAdaptiveSwitchSplitsCursorCopies(t *testing.T) {
+	a, h := newAdaptiveTracker(0.5, 64), newHeapTracker(0.5)
+	check := func(i int, v float64) {
+		a.Add(v)
+		h.Add(v)
+		if got, want := a.Quantile(), h.Quantile(); math.Float64bits(got) != math.Float64bits(want) {
+			t.Fatalf("add %d: got %v, want %v", i, got, want)
+		}
+	}
+	for i := 0; i < 1200; i++ {
+		check(i, float64(i%2))
+	}
+	for i := 0; i < 500; i++ {
+		check(1200+i, float64(i)+2)
+	}
+	if !a.switched() {
+		t.Error("want switched")
+	}
+}
+
+// TestNewTrackerUsesAdaptive checks that an interior quantile gets the adaptive tracker.
+func TestNewTrackerUsesAdaptive(t *testing.T) {
+	if _, ok := newTracker(0.5).(*adaptiveTracker); !ok {
+		t.Errorf("newTracker(0.5) is %T, want *adaptiveTracker", newTracker(0.5))
+	}
+}

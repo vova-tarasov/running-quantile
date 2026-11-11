@@ -97,8 +97,8 @@ echo /abs/path/file.jsonl | running-quantile <q> <field>
 | Empty field name `""` | error and usage, exit 2 (so a JSON key `""` can't be selected; deliberate) |
 
 My call: q uses the same number grammar as JSON, so the rule is short and easy to explain. Go's
-`strconv.ParseFloat` would also accept hex, underscores, `inf` and `nan`. The program checks the grammar first
-and only then calls `ParseFloat`.
+`strconv.ParseFloat` would also accept hex, underscores, `inf` and `nan`. `q` is accepted only if it matches the
+grammar and `ParseFloat` accepts it.
 
 The field name is a literal top-level key: `a.b` is the key `a.b`, not a nested path.
 
@@ -113,7 +113,7 @@ The field name is a literal top-level key: `a.b` is the key `a.b`, not a nested 
 | Read error in the middle of the file | the output so far is flushed, then `error: reading line N: …` on stderr, exit 1 |
 | Empty file, or no valid records | no stdout, exit 0 (plus the skipped count if > 0) |
 | Blank or whitespace-only line (only spaces, tabs and CRs) | ignored silently, not counted as skipped; it still counts in the line numbers |
-| CRLF line endings, UTF-8 BOM at the start of line 1, no final newline | accepted (a BOM anywhere else is `malformed JSON`) |
+| CRLF line endings, UTF-8 BOM at the start of line 1, no final newline | accepted (a BOM at the start of any other line is `malformed JSON`) |
 | Invalid JSON (truncated, trailing garbage, `NaN`/`Infinity`, leading zeros `05`, `+5`, `.5`, `1.`, control characters inside strings, bad escapes) | **skipped** (`malformed JSON`) |
 | Nesting deeper than 10,000 levels (the top-level object is level 1; the same limit as `encoding/json`) | **skipped** (`malformed JSON`) |
 | Valid JSON that isn't an object (`[1]`, `5`, `"x"`, `null`) | **skipped** (`not a JSON object`) |
@@ -208,9 +208,35 @@ The line reader, the scanner and the formatter are each tested to allocate nothi
 |---|---|---|---|
 | 0 | running minimum | O(1) | O(1) |
 | 1 | running maximum | O(1) | O(1) |
-| other | two heaps | 8 bytes per value | O(log n) |
+| other, few distinct values | distinct mode: a count per distinct value, plus two heaps of the distinct values | about 46 bytes per distinct value | O(log d) |
+| other, many distinct values | two heaps | 8 bytes per value | O(log n) |
 
-For 0 < q < 1, a max-heap `low` holds the k+1 smallest values and a min-heap `high` holds the rest, so x[k] is
+For 0 < q < 1 the tracker starts in **distinct mode** and may switch once to **two heaps**.
+
+#### Distinct mode
+
+- Each distinct value is stored once with a count in a `map[float64]int`. A cursor marks the distinct value
+  that holds x[k], together with its count and `below`, the number of values smaller than it.
+- Distinct values below the cursor sit in a max-heap and larger ones in a min-heap, so moving the cursor one
+  distinct value is one pop and one push. Add is O(log d), where d is the number of distinct values.
+- Memory follows d, not n: about 46 bytes per distinct value (`bytesPerDistinct`), measured by adding 1M
+  distinct values and taking the live heap after a GC (45.85 B, rounded up; `TotalAlloc` says 83.65 B because
+  it also counts the map tables discarded as the map grows).
+
+#### The switch to heaps
+
+- After each Add the tracker switches when `d > distinctFloor && 8·n ≤ bytesPerDistinct·d`, that is, when
+  storing every value (8 B each) would cost no more than the distinct structure. `distinctFloor` is 2^16, so
+  small inputs never pay for the switch.
+- The check is O(1). The switch itself is one O(n) pass that splits the values into the two heaps
+  (the cursor value's copies up to rank k go to `low`, the rest to `high`) and heapifies them.
+- It is one-way: once switched, the tracker never returns to distinct mode.
+- While it runs, the distinct structure and the new heaps both exist, so memory briefly peaks at about 2× the
+  distinct structure.
+
+#### Heaps
+
+The heaps work like this: a max-heap `low` holds the k+1 smallest values and a min-heap `high` holds the rest, so x[k] is
 the top of `low` and x[k+1] is the top of `high`.
 
 - **Add** pushes the value onto the heap it belongs to, then moves tops from one heap to the other until `low`

@@ -102,5 +102,5 @@ func newTracker(q float64) tracker {
 	case 1:
 		return &maxTracker{}
 	}
-	return newHeapTracker(q)
+	return newAdaptiveTracker(q, distinctFloor)
 }

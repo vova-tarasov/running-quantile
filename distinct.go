@@ -94,3 +94,48 @@ func (t *distinctTracker) toHeaps() *heapTracker {
 	h.high.heapify()
 	return h
 }
+
+// distinctFloor is the number of distinct values below which an adaptiveTracker never switches to heaps.
+const distinctFloor = 1 << 16
+
+// bytesPerDistinct is the memory cost of one distinct value in a distinctTracker, in bytes.
+// Measured by adding 1M distinct values to a distinctTracker: 45.85 B per value live (HeapAlloc after
+// runtime.GC(), rounded up to 46); TotalAlloc is 83.65 B per value because it counts discarded map tables.
+const bytesPerDistinct = 46
+
+// adaptiveTracker starts as a distinctTracker and switches, once and for good, to a heapTracker when storing
+// every value costs no more memory than the distinct structure.
+type adaptiveTracker struct {
+	floor int
+	d     *distinctTracker
+	h     *heapTracker
+}
+
+// newAdaptiveTracker returns an adaptiveTracker for quantile q that may switch once past floor distinct values.
+func newAdaptiveTracker(q float64, floor int) *adaptiveTracker {
+	return &adaptiveTracker{floor: floor, d: newDistinctTracker(q)}
+}
+
+// switched reports whether the tracker has switched to heaps.
+func (t *adaptiveTracker) switched() bool { return t.h != nil }
+
+// Add records v, switching to heaps when that no longer costs more memory.
+func (t *adaptiveTracker) Add(v float64) {
+	if t.h != nil {
+		t.h.Add(v)
+		return
+	}
+	t.d.Add(v)
+	if t.d.distinct() > t.floor && 8*t.d.n <= bytesPerDistinct*t.d.distinct() {
+		t.h = t.d.toHeaps()
+		t.d = nil
+	}
+}
+
+// Quantile returns the exact quantile of the values added so far.
+func (t *adaptiveTracker) Quantile() float64 {
+	if t.h != nil {
+		return t.h.Quantile()
+	}
+	return t.d.Quantile()
+}
