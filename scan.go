@@ -1,10 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // maxDepth is the deepest container nesting a line may have. The top-level object is depth 1, as in encoding/json.
@@ -75,10 +76,65 @@ func isJSONNumber(s string) bool {
 	return scanNumber([]byte(s), 0) == len(s)
 }
 
-// keyMatches reports whether a member key, given as its raw bytes between the quotes, names field.
-// A key written with any escape never matches.
-func keyMatches(raw []byte, field string) bool {
-	return string(raw) == field && bytes.IndexByte(raw, '\\') < 0
+// keyEquals reports whether a member key, given as its raw bytes between the quotes, decodes to field exactly as
+// encoding/json decodes it: escapes are resolved, a surrogate pair becomes one rune, and a lone surrogate or a byte
+// that is not valid UTF-8 becomes U+FFFD. raw must be the inside of a valid JSON string.
+// The key is decoded a rune at a time and compared with field as it goes, so nothing is allocated.
+func keyEquals(raw []byte, field string) bool {
+	i := 0
+	for i < len(raw) && raw[i] != '\\' && raw[i] < utf8.RuneSelf {
+		i++
+	}
+	if i == len(raw) { // plain ASCII decodes to itself
+		return string(raw) == field
+	}
+	j := 0 // field[:j] equals the key decoded so far
+	for i = 0; i < len(raw); {
+		r, size := rune(raw[i]), 1
+		switch {
+		case r == '\\' && raw[i+1] == 'u':
+			r, size = unicodeEscape(raw[i:]), 6
+			if utf16.IsSurrogate(r) {
+				// A high surrogate and a following low surrogate escape make one rune. Any other surrogate is
+				// U+FFFD, and the escape after it is decoded on its own.
+				if r = utf16.DecodeRune(r, unicodeEscape(raw[i+6:])); r != utf8.RuneError {
+					size = 12
+				}
+			}
+		case r == '\\':
+			r, size = rune(raw[i+1]), 2 // \" \\ \/ stand for themselves
+			if k := strings.IndexByte("bfnrt", raw[i+1]); k >= 0 {
+				r = rune("\b\f\n\r\t"[k])
+			}
+		case r >= utf8.RuneSelf:
+			r, size = utf8.DecodeRune(raw[i:]) // U+FFFD for a byte that is not valid UTF-8
+		}
+		i += size
+		var enc [utf8.UTFMax]byte
+		n := utf8.EncodeRune(enc[:], r)
+		if len(field)-j < n || field[j:j+n] != string(enc[:n]) {
+			return false
+		}
+		j += n
+	}
+	return j == len(field)
+}
+
+// unicodeEscape returns the UTF-16 code unit of the \uXXXX escape at the start of b, or -1 if b does not start
+// with one. b comes from a valid JSON string, so a \u is always followed by four hex digits.
+func unicodeEscape(b []byte) rune {
+	if len(b) < 6 || b[0] != '\\' || b[1] != 'u' {
+		return -1
+	}
+	var r rune
+	for _, c := range b[2:6] {
+		d := c - '0'
+		if c > '9' {
+			d = (c | 0x20) - 'a' + 10 // a-f in either case
+		}
+		r = r<<4 | rune(d)
+	}
+	return r
 }
 
 // scanner validates one line and remembers the value of the last top-level member whose key matches field.
@@ -141,7 +197,7 @@ func (s *scanner) container(i, depth int) int {
 		if i = s.value(i, depth); i < 0 {
 			return -1
 		}
-		if object && depth == 1 && keyMatches(key, s.field) {
+		if object && depth == 1 && keyEquals(key, s.field) {
 			s.match = b[v:i]
 		}
 		if i = skipSpace(b, i); i >= len(b) {
