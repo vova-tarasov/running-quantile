@@ -547,6 +547,11 @@ took 1.4–1.7 s in three runs on the M4.
 `make cover` on Ubuntu and on macOS. After a green run on `main`, it writes the total coverage to `coverage.json`
 on the `badges` branch, which the README's coverage badge reads.
 
+**Releases.** Pushing a tag such as `v1.0.0` runs the tests on Ubuntu and macOS, builds static binaries for
+Linux, macOS and Windows on amd64 and arm64 (`CGO_ENABLED=0`, `-trimpath`), runs the Windows build on a Windows
+runner, and publishes the archives with a `SHA256SUMS` file as a GitHub release. Running the workflow by hand
+does everything except publishing.
+
 ### What the tests cover
 
 `make test` runs every suite below except the coverage gate, the Linux runs and the stress test; the fuzz targets

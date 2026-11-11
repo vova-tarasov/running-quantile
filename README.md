@@ -29,7 +29,9 @@ The full explanation, with more diagrams, is in [docs/how-it-works.md](docs/how-
 
 ## Usage
 
-Build it with Go 1.26; there are no other dependencies:
+Download a binary for Linux, macOS or Windows from the
+[latest release](https://github.com/vova-tarasov/running-quantile/releases/latest), or build it with Go 1.26;
+there are no other dependencies:
 
 ```sh
 make build        # or: go build -o running-quantile .

@@ -1,0 +1,147 @@
+name: Release
+
+# Pushing a tag like v1.0.0 tests the code, builds the binaries, runs the Windows build on Windows and publishes a
+# GitHub release. Running the workflow by hand does everything except publishing, as a dry run.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Test
+        run: make test
+      - name: Coverage gate
+        run: make cover
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build the archives
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p build dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os=${target%/*}
+            arch=${target#*/}
+            name=running-quantile-$VERSION-$os-$arch
+            bin=running-quantile
+            if [ "$os" = windows ]; then bin=running-quantile.exe; fi
+            mkdir -p "build/$name"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags='-s -w' -o "build/$name/$bin" .
+            cp README.md "build/$name/"
+            if [ "$os" = windows ]; then
+              (cd build && zip -qr "../dist/$name.zip" "$name")
+            else
+              tar -C build -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
+          cd dist
+          sha256sum -- *.tar.gz *.zip > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/upload-artifact@v5
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  smoke-windows:
+    name: run on Windows
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist
+      - name: Run the task's example with the Windows binary
+        shell: pwsh
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          $name = "running-quantile-$env:VERSION-windows-amd64"
+          Expand-Archive -Path "dist/$name.zip" -DestinationPath .
+          $records = 5, 3, 8, 1, 9, 4 | ForEach-Object { '{"latency_ms": ' + $_ + '}' }
+          Set-Content -Path example.jsonl -Value $records
+          $out = "example.jsonl" | & ".\$name\running-quantile.exe" 0.75 latency_ms
+          if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
+          $got = $out -join ' '
+          if ($got -ne '5 4.5 6.5 5.75 8 7.25') { throw "unexpected output: $got" }
+          Write-Output "output: $got"
+
+  release:
+    needs: smoke-windows
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          cat > notes.md <<'EOF'
+          Prebuilt binaries of running-quantile @VERSION@ for Linux, macOS and Windows, on amd64 and arm64. Each
+          archive holds the binary and the README; nothing else needs to be installed.
+
+          | Platform | Archive |
+          |---|---|
+          | Linux, x86-64 | `running-quantile-@VERSION@-linux-amd64.tar.gz` |
+          | Linux, ARM64 | `running-quantile-@VERSION@-linux-arm64.tar.gz` |
+          | macOS, Apple silicon | `running-quantile-@VERSION@-darwin-arm64.tar.gz` |
+          | macOS, Intel | `running-quantile-@VERSION@-darwin-amd64.tar.gz` |
+          | Windows, x86-64 | `running-quantile-@VERSION@-windows-amd64.zip` |
+          | Windows, ARM64 | `running-quantile-@VERSION@-windows-arm64.zip` |
+
+          ### Run it
+
+          Linux and macOS:
+
+          ```sh
+          tar -xzf running-quantile-@VERSION@-linux-amd64.tar.gz
+          echo /path/to/file.jsonl | ./running-quantile-@VERSION@-linux-amd64/running-quantile 0.99 latency_ms
+          ```
+
+          Windows, in PowerShell:
+
+          ```powershell
+          "C:\data\file.jsonl" | .\running-quantile.exe 0.99 latency_ms
+          ```
+
+          The binaries are not signed. If macOS refuses to open one downloaded with a browser, run
+          `xattr -d com.apple.quarantine running-quantile` once. Windows SmartScreen may also ask for confirmation.
+
+          ### Check a download
+
+          `SHA256SUMS` lists the SHA-256 of every archive. Compare it with `sha256sum <archive>` on Linux,
+          `shasum -a 256 <archive>` on macOS, or `Get-FileHash <archive>` in PowerShell.
+          EOF
+          sed -i "s/@VERSION@/$VERSION/g" notes.md
+          gh release create "$VERSION" dist/* --repo "$GITHUB_REPOSITORY" --title "$VERSION" --notes-file notes.md --verify-tag
