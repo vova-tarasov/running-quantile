@@ -1,4 +1,4 @@
-.PHONY: build test cover bench clean
+.PHONY: build test cover bench fuzz clean
 
 build:
 	go build -o running-quantile .
@@ -15,6 +15,13 @@ cover:
 
 bench:
 	go test -run '^$$' -bench . -benchmem ./...
+
+FUZZTIME ?= 60s
+
+fuzz:
+	go test -run '^$$' -fuzz '^FuzzExtractNumber$$' -fuzztime $(FUZZTIME) .
+	go test -run '^$$' -fuzz '^FuzzTrackers$$' -fuzztime $(FUZZTIME) .
+	go test -run '^$$' -fuzz '^FuzzProcess$$' -fuzztime $(FUZZTIME) .
 
 clean:
 	rm -f running-quantile coverage.out
