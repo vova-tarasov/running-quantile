@@ -57,7 +57,7 @@ These are inputs the spec implies but no table row spells out, most likely first
 2. **The consumer stops reading** (`… | head -n 1`, or a failing stdout).
    - Expected: the program stops promptly instead of reading the rest of a huge file. Tests in Task 8.
 3. **Field names that need escaping or are non-ASCII** (`lat"ency`, `a\b`, `café`, `😀`).
-   - Expected: they match records whose key is written raw or escaped (`"café"`, `"😀"`). Tests in Task 5.
+   - Expected: they match records whose key is written raw or escaped (`"caf\u00e9"`, `"\ud83d\ude00"`). Tests in Task 5.
 4. **The field name appearing only nested, inside a string, or as a prefix or suffix of another key**
    (`{"x":{"v":1}}`, `{"note":"\"v\": 5"}`, `{"vv":1}`, `{"v_ms":1}`).
    - Expected: `missing field`, never a false match. Tests in Task 4.
@@ -279,19 +279,19 @@ These are inputs the spec implies but no table row spells out, most likely first
 
 - [ ] **Step 1: Failing tests**
   - `TestKeyEquals`, with exact cases:
-    - `v` = `v`;
+    - `\u0076` = `v`;
     - `a\"b` = `a"b`;
     - `a\\b` = `a\b`;
-    - `café` = `café`; raw `café` = `café`;
-    - `😀` = `😀`;
-    - `\ud800` = `"�"`;
-    - `\ud800v` = `"�v"`;
-    - `\udc00` = `"�"`;
-    - raw byte `\xff` = `"�"`;
+    - `caf\u00e9` = `café`; raw `café` = `café`;
+    - `\ud83d\ude00` = `😀`;
+    - `\ud800` = `"\uFFFD"`;
+    - `\ud800\u0076` = `"\uFFFDv"`;
+    - `\udc00` = `"\uFFFD"`;
+    - raw byte `\xff` = `"\uFFFD"`;
     - `v` ≠ `vv`;
-    - `v` ≠ `V`.
+    - `\u0076` ≠ `V`.
   - `TestExtractNumberMatchesEscapedAndUnicodeKeys` (Review Focus 3): fields `lat"ency`, `a\b`, `café`, `😀`, each matched in both raw and escaped spellings.
-  - `TestExtractNumberWithEscapedKeyDoesNotAllocate`: AllocsPerRun on `{"v": 5}` is `0`.
+  - `TestExtractNumberWithEscapedKeyDoesNotAllocate`: AllocsPerRun on `{"\u0076": 5}` is `0`.
   - `FuzzExtractNumber(f, line []byte, field string)`:
     - The result must equal `oracleExtract`: the same reason, and when the reason is `valid`, the same value bits.
     - Seed corpus: every line from Task 4's tables and the cases above. `go test` runs the seeds.

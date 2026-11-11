@@ -109,7 +109,7 @@ first and only then calls `ParseFloat`.
 | CRLF line endings, UTF-8 BOM at the start of line 1, no final newline | accepted |
 | Invalid JSON (truncated, trailing garbage, `NaN`/`Infinity`, leading zeros `05`, `+5`, `.5`, `1.`, control characters inside strings, bad escapes) | **skipped** (`malformed JSON`) |
 | Valid JSON that isn't an object (`[1]`, `5`, `"x"`, `null`) | **skipped** (`not a JSON object`) |
-| Field absent (match is top-level, exact, case-sensitive, after unescaping, so `"v"` matches `v`) | **skipped** (`missing field`) |
+| Field absent (match is top-level, exact, case-sensitive, after unescaping, so `"\u0076"` matches `v`) | **skipped** (`missing field`) |
 | Field is not a number (`"5"`, `true`, `null`, `[]`, `{}`) | **skipped** (`not a number`) |
 | Number beyond float64 (`1e400`) | **skipped** (`out of float64 range`) |
 | Number that underflows (`1e-400`) | accepted as 0 (this is `strconv.ParseFloat` behaviour) |
