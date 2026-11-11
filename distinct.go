@@ -96,6 +96,8 @@ func (t *distinctTracker) toHeaps() *heapTracker {
 }
 
 // distinctFloor is the number of distinct values below which an adaptiveTracker never switches to heaps.
+// It is a judgment call, not tuned by measurement: distinct mode may grow to about 3 MB (2^16 * 46 B) before
+// heaps are considered.
 const distinctFloor = 1 << 16
 
 // bytesPerDistinct is the memory cost of one distinct value in a distinctTracker, in bytes.

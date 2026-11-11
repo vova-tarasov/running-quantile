@@ -15,22 +15,25 @@ echo /abs/path/file.jsonl | ./running-quantile <q> <field>
 - Records that are malformed, lack the field, or hold something other than a number are skipped. They are counted
   and reported on stderr, and they never change the exit code (see [Input handling](#input-handling)).
 
-The example from the task, saved as `/tmp/example.jsonl`:
+The example from the task, as commands to paste into a shell at the repository root. They save the records as
+`/tmp/example.jsonl`, build the binary, and run it with q = 0.75 and the field `latency_ms`:
 
-```
+```sh
+cat > /tmp/example.jsonl <<'EOF'
 {"timestamp": "2026-06-18T10:00:01Z", "customer_id": "acme", "region": "us-east", "endpoint": "/api/v1/query", "latency_ms": 5, "bytes_sent": 8421}
 {"timestamp": "2026-06-18T10:00:02Z", "customer_id": "acme", "region": "us-east", "endpoint": "/api/v1/query", "latency_ms": 3, "bytes_sent": 9102}
 {"timestamp": "2026-06-18T10:00:03Z", "customer_id": "acme", "region": "us-west", "endpoint": "/api/v1/insert", "latency_ms": 8, "bytes_sent": 8950}
 {"timestamp": "2026-06-18T10:00:04Z", "customer_id": "globex", "region": "us-east", "endpoint": "/api/v1/query", "latency_ms": 1, "bytes_sent": 7200}
 {"timestamp": "2026-06-18T10:00:05Z", "customer_id": "acme", "region": "us-east", "endpoint": "/api/v1/query", "latency_ms": 9, "bytes_sent": 5600}
 {"timestamp": "2026-06-18T10:00:06Z", "customer_id": "globex", "region": "us-west", "endpoint": "/api/v1/insert", "latency_ms": 4, "bytes_sent": 7800}
+EOF
+make build
+echo /tmp/example.jsonl | ./running-quantile 0.75 latency_ms
 ```
 
-With q = 0.75 and the field `latency_ms`, it prints the output the task expects:
+It prints the output the task expects:
 
 ```
-$ make build
-$ echo /tmp/example.jsonl | ./running-quantile 0.75 latency_ms
 5
 4.5
 6.5
@@ -144,7 +147,8 @@ pass. Scanning a record is O(length of the line), with O(1) memory beyond the bu
 
 - After each Add the tracker switches when `d > distinctFloor && 8·n ≤ bytesPerDistinct·d`, that is, when
   storing every value (8 B each) would cost no more than the distinct structure. `distinctFloor` is 2^16, so
-  small inputs never pay for the switch.
+  small inputs never pay for the switch. The value is a judgment call, not tuned by measurement: it lets distinct
+  mode grow to about 3 MB (2^16 × 46 B) before heaps are considered.
 - The check is O(1). The switch itself is one O(n) pass that splits the values into the two heaps
   (the cursor value's copies up to rank k go to `low`, the rest to `high`) and heapifies them.
 - It is one-way: once switched, the tracker never returns to distinct mode.
